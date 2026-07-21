@@ -1,0 +1,15 @@
+services:
+  six-seven-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Keep the DB on the mounted volume.
+      SIXSEVEN_DB_PATH: /data/sixseven.db
+    volumes:
+      - ./data:/data
+      # Cache EasyOCR model weights so they aren't re-downloaded on each restart.
+      - easyocr-cache:/root/.EasyOCR
+
+volumes:
+  easyocr-cache:

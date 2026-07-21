@@ -1,0 +1,18 @@
+[Unit]
+Description=six-seven-bot (Telegram 6 7 detector)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User and paths to match your VPS.
+User=sixseven
+WorkingDirectory=/opt/six-seven-bot
+EnvironmentFile=/opt/six-seven-bot/.env
+Environment=PYTHONPATH=/opt/six-seven-bot/src
+ExecStart=/opt/six-seven-bot/.venv/bin/python -m sixseven
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

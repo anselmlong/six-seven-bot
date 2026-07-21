@@ -1,0 +1,13 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime data
+*.db
+sixseven.db
+
+# EasyOCR downloads model weights here on first run
+.EasyOCR/
