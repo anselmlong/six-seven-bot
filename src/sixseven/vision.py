@@ -1,8 +1,8 @@
 """Vision-model escalation for frames local OCR can't read.
 
-When EasyOCR finds nothing, a representative frame is sent to a Claude vision
+When EasyOCR finds nothing, a representative frame is sent to an OpenAI vision
 model with a strict yes/no question. This catches stylized, handwritten, or
-meme-format "6 7" that OCR misses. Entirely optional — with no ANTHROPIC_API_KEY
+meme-format "6 7" that OCR misses. Entirely optional — with no OPENAI_API_KEY
 the detector runs OCR-only.
 """
 
@@ -31,12 +31,12 @@ class VisionEngine:
         self._init_failed = False
         if api_key:
             try:
-                import anthropic
+                from openai import OpenAI
 
-                self._client = anthropic.Anthropic(api_key=api_key)
+                self._client = OpenAI(api_key=api_key)
             except Exception as exc:
                 self._init_failed = True
-                log.warning("Anthropic client unavailable, vision disabled: %s", exc)
+                log.warning("OpenAI client unavailable, vision disabled: %s", exc)
 
     @property
     def enabled(self) -> bool:
@@ -57,7 +57,7 @@ class VisionEngine:
             return False
         try:
             data = self._frame_to_png_b64(image)
-            resp = self._client.messages.create(
+            resp = self._client.chat.completions.create(
                 model=self._model,
                 max_tokens=5,
                 messages=[
@@ -65,11 +65,9 @@ class VisionEngine:
                         "role": "user",
                         "content": [
                             {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/png",
-                                    "data": data,
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{data}",
                                 },
                             },
                             {"type": "text", "text": _PROMPT},
@@ -77,10 +75,8 @@ class VisionEngine:
                     }
                 ],
             )
-            text = "".join(
-                b.text for b in resp.content if getattr(b, "type", None) == "text"
-            )
-            return text.strip().upper().startswith("YES")
+            text = (resp.choices[0].message.content or "").strip()
+            return text.upper().startswith("YES")
         except Exception as exc:
             log.warning("vision check failed: %s", exc)
             return False

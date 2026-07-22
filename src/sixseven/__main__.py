@@ -30,7 +30,7 @@ def main() -> None:
 
     storage = Storage(config.db_path)
     ocr = OcrEngine(config.ocr_languages, enabled=config.ocr_enabled)
-    vision = VisionEngine(config.anthropic_api_key, config.vision_model)
+    vision = VisionEngine(config.openai_api_key, config.vision_model)
     detector = Detector(
         ocr=ocr,
         vision=vision,

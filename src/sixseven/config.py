@@ -31,8 +31,8 @@ def _int(name: str, default: int) -> int:
 @dataclass
 class Config:
     telegram_bot_token: str
-    anthropic_api_key: str = ""
-    vision_model: str = "claude-haiku-4-5"
+    openai_api_key: str = ""
+    vision_model: str = "gpt-4o-mini"
     ocr_enabled: bool = True
     ocr_languages: list[str] = field(default_factory=lambda: ["en"])
     # How many frames to sample from a video/animation for OCR.
@@ -46,7 +46,7 @@ class Config:
 
     @property
     def vision_enabled(self) -> bool:
-        return bool(self.anthropic_api_key)
+        return bool(self.openai_api_key)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -59,8 +59,8 @@ class Config:
         langs = os.getenv("SIXSEVEN_OCR_LANGS", "en")
         return cls(
             telegram_bot_token=token,
-            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
-            vision_model=os.getenv("SIXSEVEN_VISION_MODEL", "claude-haiku-4-5").strip(),
+            openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+            vision_model=os.getenv("SIXSEVEN_VISION_MODEL", "gpt-4o-mini").strip(),
             ocr_enabled=_bool("SIXSEVEN_OCR_ENABLED", True),
             ocr_languages=[s.strip() for s in langs.split(",") if s.strip()],
             video_frame_samples=_int("SIXSEVEN_VIDEO_FRAMES", 4),

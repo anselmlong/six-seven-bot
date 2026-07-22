@@ -33,7 +33,39 @@ class Storage:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_config (
+                chat_id      INTEGER NOT NULL PRIMARY KEY,
+                notify_mode  TEXT    NOT NULL DEFAULT 'instant'
+            )
+            """
+        )
         self._conn.commit()
+
+    def get_notify_mode(self, chat_id: int) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT notify_mode FROM chat_config WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+        return row[0] if row else "instant"
+
+    def set_notify_mode(self, chat_id: int, mode: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO chat_config (chat_id, notify_mode) VALUES (?, ?)
+                   ON CONFLICT(chat_id) DO UPDATE SET notify_mode = excluded.notify_mode""",
+                (chat_id, mode),
+            )
+            self._conn.commit()
+
+    def get_daily_chats(self) -> list[int]:
+        """Return chat_ids that have notify_mode='daily'."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT chat_id FROM chat_config WHERE notify_mode = 'daily'"
+            ).fetchall()
+        return [r[0] for r in rows]
 
     def increment(
         self,
