@@ -8,7 +8,7 @@ import logging
 import os
 import random
 import tempfile
-from datetime import time, timezone
+from datetime import datetime, time, timezone
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -47,6 +47,7 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     app.bot_data["config"] = config
     app.bot_data["storage"] = storage
     app.bot_data["detector"] = detector
+    app.bot_data["startup_time"] = datetime.now(timezone.utc)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
@@ -173,6 +174,10 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     user = update.effective_user
     if msg is None or user is None:
+        return
+
+    # Skip messages sent before the bot started (old queued updates)
+    if msg.date and msg.date.replace(tzinfo=timezone.utc) < context.bot_data["startup_time"]:
         return
 
     resolved = _resolve_media(msg, config)
