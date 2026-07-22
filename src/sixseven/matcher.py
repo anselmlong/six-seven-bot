@@ -19,28 +19,39 @@ _SEVEN_WORD = re.compile(r"\bseven\b", re.IGNORECASE)
 # "six seven" -> "6 7". Order-sensitive: the meme is "six seven", not "seven six".
 _ADJACENT = re.compile(r"6[\s\W]{0,3}7")
 
+# Same but for 69 ("69", "6 9", "6-9", "6/9", "six nine" -> "6 9" -> "69").
+_ADJACENT_69 = re.compile(r"6[\s\W]{0,3}9")
+
+_NINE_WORD = re.compile(r"\bnine\b", re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class MatchResult:
     matched: bool
     snippet: str = ""
+    kind: str = ""  # "67" or "69"
 
 
 def _normalize(text: str) -> str:
-    """Lowercase and turn the standalone words six/seven into digits."""
+    """Lowercase and turn the standalone words six/seven/nine into digits."""
     text = _SIX_WORD.sub("6", text)
     text = _SEVEN_WORD.sub("7", text)
+    text = _NINE_WORD.sub("9", text)
     return text.lower()
 
 
 def find_match(text: str) -> MatchResult:
-    """Return whether `text` contains a 'six seven', plus the matched snippet."""
+    """Return whether `text` contains a 'six seven' or '69', plus which kind."""
     if not text:
         return MatchResult(False)
     normalized = _normalize(text)
+    # Check 69 first so "6 9" doesn't also match the 67 pattern
+    m = _ADJACENT_69.search(normalized)
+    if m:
+        return MatchResult(True, snippet=m.group(0).strip(), kind="69")
     m = _ADJACENT.search(normalized)
     if m:
-        return MatchResult(True, snippet=m.group(0).strip())
+        return MatchResult(True, snippet=m.group(0).strip(), kind="67")
     return MatchResult(False)
 
 
