@@ -208,7 +208,7 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # 69 gets a special response — no counter, no leaderboard
     if result.method == "ocr" and "69" in result.detail:
-        await msg.reply_text("69. nice")
+        await msg.reply_text("69. nice 😎👍")
         return
 
     new_count = storage.increment(
