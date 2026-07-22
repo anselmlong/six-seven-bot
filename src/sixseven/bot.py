@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timezone
 
 from telegram import Update
@@ -49,6 +50,14 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     app.bot_data["detector"] = detector
     app.bot_data["startup_time"] = datetime.now(timezone.utc)
 
+    # All detection runs on one dedicated worker thread. EasyOCR/torch/OpenCV
+    # native code is not guaranteed re-entrant, so serialising through a single
+    # thread rules out concurrent-access crashes and caps memory to one image
+    # at a time — regardless of the Application's concurrent_updates setting.
+    app.bot_data["detect_executor"] = ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="detect"
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("top", cmd_top))
@@ -63,6 +72,7 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
         | filters.Sticker.ALL
     )
     app.add_handler(MessageHandler(media_filter, on_media))
+    app.add_error_handler(on_error)
 
     # Daily summary at 0000 SGT = 1600 UTC
     app.job_queue.run_daily(
@@ -85,6 +95,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /notify — change how you get notified\n"
         "• /start — this"
     )
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log any error PTB catches so it lands in the container logs with a
+    traceback, instead of being silently swallowed."""
+    log.error("unhandled error while processing an update", exc_info=context.error)
 
 
 def _format_leaderboard(rows) -> str:
@@ -198,7 +214,9 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         tg_file = await context.bot.get_file(file_id)
         await tg_file.download_to_drive(path)
 
-        result = await asyncio.to_thread(detector.detect, path, kind)
+        loop = asyncio.get_running_loop()
+        executor: ThreadPoolExecutor = context.bot_data["detect_executor"]
+        result = await loop.run_in_executor(executor, detector.detect, path, kind)
     except Exception as exc:
         log.warning("failed to process media %s: %s", file_id, exc)
         return

@@ -3,6 +3,11 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    # Safety valve: cap container memory so a runaway OCR allocation is killed
+    # at the container boundary (clean exit 137, visible in `docker inspect`)
+    # instead of silently OOM-killing something on the host. Raise if the VPS
+    # has room; EasyOCR + torch resident is ~0.5–1 GB, so 2g leaves headroom.
+    mem_limit: 2g
     environment:
       # Keep the DB on the mounted volume.
       SIXSEVEN_DB_PATH: /data/sixseven.db
