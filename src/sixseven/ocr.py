@@ -3,6 +3,9 @@
 The reader is loaded lazily on first use (it pulls in torch and downloads model
 weights), and any failure degrades gracefully to "no text" so the bot keeps
 running on the vision layer alone.
+
+Images are preprocessed for contrast, deskew, and sharpness before hitting
+EasyOCR, so faint or rotated "67" in memes still gets caught.
 """
 
 from __future__ import annotations
@@ -13,6 +16,14 @@ import numpy as np
 from PIL import Image
 
 log = logging.getLogger(__name__)
+
+try:
+    import cv2
+
+    _HAS_CV2 = True
+except ImportError:
+    _HAS_CV2 = False
+    log.info("OpenCV not available — preprocessing disabled")
 
 
 class OcrEngine:
@@ -29,13 +40,51 @@ class OcrEngine:
             import easyocr
 
             log.info("initializing EasyOCR (languages=%s)…", self._languages)
-            # gpu=False keeps it VPS-friendly; set to True if CUDA is available.
             self._reader = easyocr.Reader(self._languages, gpu=False, verbose=False)
             log.info("EasyOCR ready")
         except Exception as exc:
             self._init_failed = True
             log.warning("EasyOCR unavailable, OCR disabled: %s", exc)
         return self._reader
+
+    def _preprocess(self, image: Image.Image) -> np.ndarray:
+        """Enhance contrast, deskew, and sharpen for better OCR accuracy."""
+        arr = np.array(image.convert("L"))  # grayscale
+
+        if not _HAS_CV2:
+            return arr
+
+        import cv2 as cv
+
+        # 1. CLAHE — adaptive contrast so faint text on similar backgrounds pops
+        clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        arr = clahe.apply(arr)
+
+        # 2. Otsu binarisation — separate text from background cleanly
+        _, arr = cv.threshold(arr, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+
+        # 3. Deskew — find the dominant text angle and rotate it straight
+        coords = cv.findNonZero(255 - arr)  # white text on black
+        if coords is not None:
+            angle = cv.minAreaRect(coords)[-1]
+            if angle < -45:
+                angle += 90
+            if abs(angle) > 0.5:
+                h, w = arr.shape
+                mat = cv.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+                arr = cv.warpAffine(
+                    arr, mat, (w, h),
+                    flags=cv.INTER_CUBIC,
+                    borderMode=cv.BORDER_REPLICATE,
+                )
+
+        # 4. Invert back so EasyOCR sees dark text on light bg
+        arr = 255 - arr
+
+        # 5. Mild sharpen — crisps up edges without adding noise
+        arr = cv.filter2D(arr, -1, np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]]))
+
+        return arr
 
     def extract_text(self, image: Image.Image) -> str:
         """Return all text EasyOCR reads in the frame, joined by spaces."""
@@ -45,7 +94,7 @@ class OcrEngine:
         if reader is None:
             return ""
         try:
-            arr = np.array(image)
+            arr = self._preprocess(image)
             results = reader.readtext(arr, detail=0, paragraph=False)
             return " ".join(results)
         except Exception as exc:
