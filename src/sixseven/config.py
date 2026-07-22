@@ -32,7 +32,7 @@ def _int(name: str, default: int) -> int:
 class Config:
     telegram_bot_token: str
     openai_api_key: str = ""
-    vision_model: str = "gpt-4o-mini"
+    vision_model: str = "gpt-4o"
     ocr_enabled: bool = True
     ocr_languages: list[str] = field(default_factory=lambda: ["en"])
     # How many frames to sample from a video/animation for OCR.
@@ -60,7 +60,7 @@ class Config:
         return cls(
             telegram_bot_token=token,
             openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
-            vision_model=os.getenv("SIXSEVEN_VISION_MODEL", "gpt-4o-mini").strip(),
+            vision_model=os.getenv("SIXSEVEN_VISION_MODEL", "gpt-4o").strip(),
             ocr_enabled=_bool("SIXSEVEN_OCR_ENABLED", True),
             ocr_languages=[s.strip() for s in langs.split(",") if s.strip()],
             video_frame_samples=_int("SIXSEVEN_VIDEO_FRAMES", 4),

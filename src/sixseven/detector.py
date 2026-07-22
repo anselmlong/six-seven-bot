@@ -41,23 +41,31 @@ class Detector:
 
     def detect(self, path: str, kind: str) -> DetectionResult:
         """Blocking; call via asyncio.to_thread from the async bot handlers."""
+        log.info("detect: %s frames=%s", path, self._video_frame_samples)
         frames = media.extract_frames(path, kind, self._video_frame_samples)
         if not frames:
+            log.info("detect: no frames extracted")
             return DetectionResult(False)
 
         # Pass 1 — local OCR on every frame.
-        for frame in frames:
+        for i, frame in enumerate(frames):
             text = self._ocr.extract_text(frame)
+            log.info("detect: ocr frame %d text=%r", i, text[:80] if text else "(empty)")
             result = find_match(text)
             if result.matched:
+                log.info("detect: ocr match kind=%s snippet=%s", result.kind, result.snippet)
                 return DetectionResult(True, method="ocr", detail=result.snippet)
 
         # Pass 2 — escalate representative frames to the vision model.
         if self._vision.enabled and self._vision_max_frames > 0:
-            for frame in self._representative_frames(frames):
+            for i, frame in enumerate(self._representative_frames(frames)):
+                log.info("detect: vision check frame %d", i)
                 if self._vision.frame_contains_six_seven(frame):
+                    log.info("detect: vision match")
                     return DetectionResult(True, method="vision", detail="vision")
+                log.info("detect: vision no match")
 
+        log.info("detect: no match")
         return DetectionResult(False)
 
     def _representative_frames(self, frames):

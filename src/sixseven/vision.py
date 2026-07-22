@@ -17,10 +17,11 @@ from PIL import Image
 log = logging.getLogger(__name__)
 
 _PROMPT = (
-    "Does this image visually contain the numbers 6 and 7 together — as the "
-    'digits "67" / "6 7", or the words "six seven" — whether printed, '
-    "handwritten, stylized, drawn, or as a meme? Answer with exactly one "
-    "word: YES or NO."
+    "Does this image contain the digits 6 and 7 adjacent to each other (as "
+    '"67")? They can appear anywhere — inside a longer number like "467" or '
+    '"6674K", as a standalone "67", or written as "six seven". Stylized, '
+    "handwritten, printed, meme text — any format counts. Answer with exactly "
+    "one word: YES or NO."
 )
 
 

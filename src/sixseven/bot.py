@@ -194,6 +194,7 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         tf = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
         path = tf.name
         tf.close()
+        log.info("on_media: downloading %s (kind=%s, size=%d)", file_id, kind, size or 0)
         tg_file = await context.bot.get_file(file_id)
         await tg_file.download_to_drive(path)
 

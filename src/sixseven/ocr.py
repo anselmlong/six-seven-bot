@@ -48,7 +48,7 @@ class OcrEngine:
         return self._reader
 
     def _preprocess(self, image: Image.Image) -> np.ndarray:
-        """Enhance contrast, deskew, and sharpen for better OCR accuracy."""
+        """Light contrast bump and sharpen — no aggressive binarization."""
         arr = np.array(image.convert("L"))  # grayscale
 
         if not _HAS_CV2:
@@ -57,31 +57,10 @@ class OcrEngine:
         import cv2 as cv
 
         # 1. CLAHE — adaptive contrast so faint text on similar backgrounds pops
-        clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        clahe = cv.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
         arr = clahe.apply(arr)
 
-        # 2. Otsu binarisation — separate text from background cleanly
-        _, arr = cv.threshold(arr, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
-
-        # 3. Deskew — find the dominant text angle and rotate it straight
-        coords = cv.findNonZero(255 - arr)  # white text on black
-        if coords is not None:
-            angle = cv.minAreaRect(coords)[-1]
-            if angle < -45:
-                angle += 90
-            if abs(angle) > 0.5:
-                h, w = arr.shape
-                mat = cv.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
-                arr = cv.warpAffine(
-                    arr, mat, (w, h),
-                    flags=cv.INTER_CUBIC,
-                    borderMode=cv.BORDER_REPLICATE,
-                )
-
-        # 4. Invert back so EasyOCR sees dark text on light bg
-        arr = 255 - arr
-
-        # 5. Mild sharpen — crisps up edges without adding noise
+        # 2. Mild sharpen — crisps up edges without adding noise
         arr = cv.filter2D(arr, -1, np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]]))
 
         return arr
