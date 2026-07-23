@@ -16,6 +16,9 @@ class LeaderRow:
     count: int
 
 
+_DEDUP_TTL = 7 * 24 * 3600  # 7 days in seconds
+
+
 class Storage:
     def __init__(self, db_path: str) -> None:
         self._lock = threading.Lock()
@@ -41,7 +44,22 @@ class Storage:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processed_messages (
+                chat_id      INTEGER NOT NULL,
+                message_id   INTEGER NOT NULL,
+                processed_at REAL    NOT NULL,
+                PRIMARY KEY (chat_id, message_id)
+            )
+            """
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_processed_messages_cleanup "
+            "ON processed_messages (processed_at)"
+        )
         self._conn.commit()
+        self._cleanup_processed_messages()
 
     def get_notify_mode(self, chat_id: int) -> str:
         with self._lock:
@@ -95,6 +113,32 @@ class Storage:
                 (chat_id, user_id),
             ).fetchone()
         return int(row[0]) if row else 0
+
+    def is_first_time(self, chat_id: int, message_id: int) -> bool:
+        """Atomically check-and-mark a message as processed.
+
+        Returns True the FIRST time a (chat_id, message_id) pair is seen.
+        Returns False for any subsequent call with the same pair — even after
+        a process restart — preventing double-counting from all causes
+        (Telegram re-delivery, concurrent processing, crash recovery, etc.).
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT OR IGNORE INTO processed_messages (chat_id, message_id, processed_at) "
+                "VALUES (?, ?, ?)",
+                (chat_id, message_id, time.time()),
+            )
+            self._conn.commit()
+            return cursor.rowcount == 1
+
+    def _cleanup_processed_messages(self) -> None:
+        """Remove entries older than the TTL to keep the table bounded."""
+        cutoff = time.time() - _DEDUP_TTL
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM processed_messages WHERE processed_at < ?", (cutoff,)
+            )
+            self._conn.commit()
 
     def leaderboard(self, chat_id: int, limit: int = 10) -> list[LeaderRow]:
         with self._lock:

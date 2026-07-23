@@ -37,3 +37,28 @@ def test_counts_are_scoped_per_chat(tmp_path):
     assert len(store.leaderboard(1)) == 1
 
     store.close()
+
+
+def test_is_first_time_dedup(tmp_path):
+    db = str(tmp_path / "t.db")
+    store = Storage(db)
+
+    # First call should return True
+    assert store.is_first_time(1, 101) is True
+    # Same message again should return False
+    assert store.is_first_time(1, 101) is False
+    assert store.is_first_time(1, 101) is False  # idempotent
+
+    # Different message in same chat should be True
+    assert store.is_first_time(1, 102) is True
+
+    # Same message_id in different chat should be True
+    assert store.is_first_time(2, 101) is True
+
+    # Verify dedup survives a new Storage instance (simulates restart)
+    store.close()
+    store2 = Storage(db)
+    assert store2.is_first_time(1, 101) is False  # still tracked
+    assert store2.is_first_time(1, 999) is True   # new message
+
+    store2.close()

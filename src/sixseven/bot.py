@@ -196,6 +196,10 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if msg.date and msg.date.replace(tzinfo=timezone.utc) < context.bot_data["startup_time"]:
         return
 
+    # Dedup: skip messages already processed (survives restarts, re-delivery)
+    if not storage.is_first_time(update.effective_chat.id, msg.message_id):
+        return
+
     resolved = _resolve_media(msg, config)
     if resolved is None:
         return
