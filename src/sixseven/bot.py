@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timezone
 
@@ -41,6 +42,8 @@ _DETECT_MSGS = [
 ]
 
 _NOTIFY_MODES = {"instant", "daily", "quiet"}
+_RESET_SCHEDULES = {"off", "daily", "weekly", "monthly"}
+_CHANGELOG_CHATS = {495290408}  # anselm's DM
 
 
 def build_application(config: Config, storage: Storage, detector: Detector) -> Application:
@@ -63,13 +66,14 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     app.add_handler(CommandHandler("top", cmd_top))
     app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("notify", cmd_notify))
+    app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("changelog", cmd_changelog))
 
     media_filter = (
         filters.PHOTO
         | filters.VIDEO
         | filters.VIDEO_NOTE
         | filters.ANIMATION
-        | filters.Sticker.ALL
     )
     app.add_handler(MessageHandler(media_filter, on_media))
     app.add_error_handler(on_error)
@@ -81,18 +85,27 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
         name="daily-67-summary",
     )
 
+    # Auto-reset check every hour
+    app.job_queue.run_repeating(
+        auto_reset_check,
+        interval=3600,
+        first=300,  # first check 5 min after startup
+        name="auto-reset-check",
+    )
+
     return app
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "yo i'm the 67 bot. add me to a group and i'll watch every photo, "
-        "video, gif, and sticker for 67. every time someone drops it, "
+        "video, and gif for 67. every time someone drops it, "
         "their counter goes up.\n\n"
         "commands:\n"
         "• /top — who's the 67 goat in this chat\n"
         "• /me — your 67 count\n"
         "• /notify — change how you get notified\n"
+        "• /reset — leaderboard reset (admin only)\n"
         "• /start — this"
     )
 
@@ -160,6 +173,93 @@ async def cmd_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(f"notify mode set to: {labels[mode]}")
 
 
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reset the leaderboard for this chat (admin only)."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if user is None or chat is None:
+        return
+
+    # Only group admins (or the bot's DM)
+    if chat.type != "private":
+        member = await chat.get_member(user.id)
+        if member.status not in ("administrator", "creator"):
+            await update.effective_message.reply_text("only admins can reset the leaderboard")
+            return
+
+    storage: Storage = context.bot_data["storage"]
+    args = context.args
+
+    if not args:
+        schedule = storage.get_reset_schedule(chat.id)
+        await update.effective_message.reply_text(
+            f"current reset schedule: {schedule}\n\n"
+            "options:\n"
+            "• /reset now — wipe the leaderboard (requires confirmation)\n"
+            "• /reset daily — auto-reset every day\n"
+            "• /reset weekly — auto-reset every Monday\n"
+            "• /reset monthly — auto-reset every 1st of the month\n"
+            "• /reset off — disable auto-reset"
+        )
+        return
+
+    cmd = args[0].lower()
+
+    if cmd == "now":
+        context.bot_data["pending_reset"] = {
+            "chat_id": chat.id,
+            "user_id": user.id,
+            "time": time.time(),
+        }
+        await update.effective_message.reply_text(
+            "this will wipe ALL 67 counts for this chat. "
+            "type /reset confirm within 30 seconds to proceed."
+        )
+        return
+
+    if cmd == "confirm":
+        pending = context.bot_data.get("pending_reset")
+        if not pending or pending["chat_id"] != chat.id or pending["user_id"] != user.id:
+            await update.effective_message.reply_text("no pending reset. start with /reset now")
+            return
+        if time.time() - pending["time"] > 30:
+            await update.effective_message.reply_text("confirmation expired. start again with /reset now")
+            return
+        del context.bot_data["pending_reset"]
+        storage.reset_leaderboard(chat.id)
+        await update.effective_message.reply_text("leaderboard reset. everyone starts fresh 🫡")
+        return
+
+    if cmd in _RESET_SCHEDULES:
+        storage.set_reset_schedule(chat.id, cmd)
+        labels = {
+            "off": "auto-reset disabled",
+            "daily": "resets daily at midnight",
+            "weekly": "resets weekly on Monday",
+            "monthly": "resets monthly on the 1st",
+        }
+        await update.effective_message.reply_text(f"reset schedule set to: {labels[cmd]}")
+        return
+
+    await update.effective_message.reply_text(f"'{cmd}' ain't a valid option. try /reset for help")
+
+
+async def cmd_changelog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the changelog (whitelisted chats only)."""
+    if update.effective_chat.id not in _CHANGELOG_CHATS:
+        return
+    await update.effective_message.reply_text(
+        "what's new in 67 bot:\n\n"
+        "• stickers removed from detection (no more false positives)\n"
+        "• /reset — admins can reset the leaderboard\n"
+        "  • /reset now — manual reset with confirmation\n"
+        "  • /reset daily|weekly|monthly — auto-reset on schedule\n"
+        "• message dedup — no more double-counting from restarts\n"
+        "• better OCR — removed aggressive preprocessing\n"
+        "• upgraded vision model to gpt-4o for better accuracy"
+    )
+
+
 def _resolve_media(msg, config: Config):
     """Return (file_id, kind, size_bytes) or None if there's nothing to scan."""
     if msg.photo:
@@ -171,14 +271,6 @@ def _resolve_media(msg, config: Config):
         return msg.video_note.file_id, media.KIND_VIDEO, msg.video_note.file_size
     if msg.animation:
         return msg.animation.file_id, media.KIND_VIDEO, msg.animation.file_size
-    if msg.sticker:
-        if not config.scan_stickers:
-            return None
-        st = msg.sticker
-        if st.is_animated:  # .tgs (Lottie) — not a raster we can OCR
-            return None
-        kind = media.KIND_VIDEO if st.is_video else media.KIND_IMAGE
-        return st.file_id, kind, st.file_size
     return None
 
 
@@ -260,6 +352,22 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user=mention, count=new_count, plural=plural
     )
     await msg.reply_text(msg_text, parse_mode=ParseMode.HTML)
+
+
+async def auto_reset_check(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Periodic check: reset leaderboards for chats whose schedule is due."""
+    storage: Storage = context.bot_data["storage"]
+    now = time.time()
+    for chat_id in storage.get_chats_due_for_reset(now):
+        storage.reset_leaderboard(chat_id)
+        log.info("auto-reset leaderboard for chat %d", chat_id)
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="leaderboard auto-reset. everyone starts fresh 🫡",
+            )
+        except Exception as exc:
+            log.warning("failed to notify chat %d of reset: %s", chat_id, exc)
 
 
 async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:

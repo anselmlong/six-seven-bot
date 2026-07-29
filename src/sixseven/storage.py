@@ -58,6 +58,19 @@ class Storage:
             "CREATE INDEX IF NOT EXISTS idx_processed_messages_cleanup "
             "ON processed_messages (processed_at)"
         )
+        # Migrate existing chat_config rows to add reset columns
+        try:
+            self._conn.execute(
+                "ALTER TABLE chat_config ADD COLUMN reset_schedule TEXT NOT NULL DEFAULT 'off'"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self._conn.execute(
+                "ALTER TABLE chat_config ADD COLUMN last_reset_at REAL NOT NULL DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
         self._conn.commit()
         self._cleanup_processed_messages()
 
@@ -139,6 +152,63 @@ class Storage:
                 "DELETE FROM processed_messages WHERE processed_at < ?", (cutoff,)
             )
             self._conn.commit()
+
+    def set_reset_schedule(self, chat_id: int, schedule: str) -> None:
+        """Set auto-reset schedule for a chat (off/daily/weekly/monthly)."""
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO chat_config (chat_id, reset_schedule, last_reset_at)
+                   VALUES (?, ?, 0)
+                   ON CONFLICT(chat_id) DO UPDATE SET
+                       reset_schedule = excluded.reset_schedule""",
+                (chat_id, schedule),
+            )
+            self._conn.commit()
+
+    def get_reset_schedule(self, chat_id: int) -> str:
+        """Return the current reset schedule for a chat."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT reset_schedule FROM chat_config WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+        return row[0] if row else "off"
+
+    def reset_leaderboard(self, chat_id: int) -> None:
+        """Wipe all counts for a chat and stamp the reset time."""
+        now = time.time()
+        with self._lock:
+            self._conn.execute("DELETE FROM counts WHERE chat_id = ?", (chat_id,))
+            self._conn.execute(
+                """INSERT INTO chat_config (chat_id, last_reset_at) VALUES (?, ?)
+                   ON CONFLICT(chat_id) DO UPDATE SET
+                       last_reset_at = excluded.last_reset_at""",
+                (chat_id, now),
+            )
+            self._conn.commit()
+
+    def get_chats_due_for_reset(self, now: float | None = None) -> list[int]:
+        """Return chat_ids whose auto-reset schedule is due.
+
+        Daily = 24h since last reset, weekly = 7 days, monthly = 30 days.
+        """
+        if now is None:
+            now = time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT chat_id, reset_schedule, COALESCE(last_reset_at, 0) as last_reset
+                   FROM chat_config
+                   WHERE reset_schedule != 'off'""",
+            ).fetchall()
+        due = []
+        for chat_id, schedule, last_reset in rows:
+            age = now - last_reset
+            if schedule == "daily" and age >= 86400:
+                due.append(chat_id)
+            elif schedule == "weekly" and age >= 604800:
+                due.append(chat_id)
+            elif schedule == "monthly" and age >= 2592000:
+                due.append(chat_id)
+        return due
 
     def leaderboard(self, chat_id: int, limit: int = 10) -> list[LeaderRow]:
         with self._lock:
