@@ -9,7 +9,7 @@ One hit per message is enough — a video full of 6 7s counts once.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import media
 from .matcher import find_match
@@ -22,8 +22,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class DetectionResult:
     matched: bool
-    method: str = ""  # "ocr" | "vision" | ""
-    detail: str = ""
+    kinds: list[str] = field(default_factory=list)  # ["67"] and/or ["69"]
 
 
 class Detector:
@@ -48,13 +47,19 @@ class Detector:
             return DetectionResult(False)
 
         # Pass 1 — local OCR on every frame.
+        kinds: set[str] = set()
         for i, frame in enumerate(frames):
             text = self._ocr.extract_text(frame)
             log.info("detect: ocr frame %d text=%r", i, text[:80] if text else "(empty)")
             result = find_match(text)
             if result.matched:
+                kinds.add(result.kind)
                 log.info("detect: ocr match kind=%s snippet=%s", result.kind, result.snippet)
-                return DetectionResult(True, method="ocr", detail=result.snippet)
+                if len(kinds) == 2:  # found both 67 and 69
+                    break
+
+        if kinds:
+            return DetectionResult(True, kinds=sorted(kinds))
 
         # Pass 2 — escalate representative frames to the vision model.
         if self._vision.enabled and self._vision_max_frames > 0:
@@ -62,7 +67,7 @@ class Detector:
                 log.info("detect: vision check frame %d", i)
                 if self._vision.frame_contains_six_seven(frame):
                     log.info("detect: vision match")
-                    return DetectionResult(True, method="vision", detail="vision")
+                    return DetectionResult(True, kinds=["67"])
                 log.info("detect: vision no match")
 
         log.info("detect: no match")

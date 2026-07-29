@@ -256,7 +256,8 @@ async def cmd_changelog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "  • /reset daily|weekly|monthly — auto-reset on schedule\n"
         "• message dedup — no more double-counting from restarts\n"
         "• better OCR — removed aggressive preprocessing\n"
-        "• upgraded vision model to gpt-4o for better accuracy"
+        "• upgraded vision model to gpt-4o for better accuracy\n"
+        "• both 69 and 67 — if an image contains both, both messages fire"
     )
 
 
@@ -326,32 +327,34 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not result.matched:
         return
 
+    kinds = set(result.kinds)
+
     # 69 gets a special response — no counter, no leaderboard
-    if result.method == "ocr" and "69" in result.detail:
+    if "69" in kinds:
         await msg.reply_text("69. nice 😎👍")
-        return
 
-    new_count = storage.increment(
-        update.effective_chat.id,
-        user.id,
-        user.full_name,
-        user.username or "",
-    )
+    if "67" in kinds:
+        new_count = storage.increment(
+            update.effective_chat.id,
+            user.id,
+            user.full_name,
+            user.username or "",
+        )
 
-    # Check notify mode
-    mode = storage.get_notify_mode(update.effective_chat.id)
-    if mode == "quiet":
-        return
-    if mode == "daily":
-        return  # daily summary handled by the scheduled job
+        # Check notify mode
+        mode = storage.get_notify_mode(update.effective_chat.id)
+        if mode == "quiet":
+            return
+        if mode == "daily":
+            return  # daily summary handled by the scheduled job
 
-    # instant mode — reply right away
-    plural = "s" if new_count != 1 else ""
-    mention = user.mention_html()
-    msg_text = random.choice(_DETECT_MSGS).format(
-        user=mention, count=new_count, plural=plural
-    )
-    await msg.reply_text(msg_text, parse_mode=ParseMode.HTML)
+        # instant mode — reply right away
+        plural = "s" if new_count != 1 else ""
+        mention = user.mention_html()
+        msg_text = random.choice(_DETECT_MSGS).format(
+            user=mention, count=new_count, plural=plural
+        )
+        await msg.reply_text(msg_text, parse_mode=ParseMode.HTML)
 
 
 async def auto_reset_check(context: ContextTypes.DEFAULT_TYPE) -> None:
