@@ -8,9 +8,9 @@ import logging
 import os
 import random
 import tempfile
-import time
+import time as _time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, time as _dt_time, timezone
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -81,7 +81,7 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     # Daily summary at 0000 SGT = 1600 UTC
     app.job_queue.run_daily(
         daily_summary,
-        time=datetime.time(hour=16, minute=0, tzinfo=timezone.utc),
+        time=_dt_time(hour=16, minute=0, tzinfo=timezone.utc),
         name="daily-67-summary",
     )
 
@@ -209,7 +209,7 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.bot_data["pending_reset"] = {
             "chat_id": chat.id,
             "user_id": user.id,
-            "time": time.time(),
+            "time": _time.time(),
         }
         await update.effective_message.reply_text(
             "this will wipe ALL 67 counts for this chat. "
@@ -222,7 +222,7 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not pending or pending["chat_id"] != chat.id or pending["user_id"] != user.id:
             await update.effective_message.reply_text("no pending reset. start with /reset now")
             return
-        if time.time() - pending["time"] > 30:
+        if _time.time() - pending["time"] > 30:
             await update.effective_message.reply_text("confirmation expired. start again with /reset now")
             return
         del context.bot_data["pending_reset"]
@@ -360,7 +360,7 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def auto_reset_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic check: reset leaderboards for chats whose schedule is due."""
     storage: Storage = context.bot_data["storage"]
-    now = time.time()
+    now = _time.time()
     for chat_id in storage.get_chats_due_for_reset(now):
         storage.reset_leaderboard(chat_id)
         log.info("auto-reset leaderboard for chat %d", chat_id)
