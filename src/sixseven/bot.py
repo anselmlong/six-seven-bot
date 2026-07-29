@@ -7,6 +7,7 @@ import html
 import logging
 import os
 import random
+import re
 import tempfile
 import time as _time
 from concurrent.futures import ThreadPoolExecutor
@@ -96,6 +97,7 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
         | filters.ANIMATION
     )
     app.add_handler(MessageHandler(media_filter, on_media))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)\bscuba\b"), cmd_scuba))
     app.add_error_handler(on_error)
 
     # Daily summary at 0000 SGT = 1600 UTC
@@ -339,6 +341,20 @@ async def announce_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.bot_data.pop("announce_msg", None)
     await update.effective_message.reply_text("cancelled.")
     return ConversationHandler.END
+
+
+_SCUBA_PATH = "/data/scuba.mp4"
+
+
+async def cmd_scuba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the scuba reaction when someone says 'scuba'."""
+    if not os.path.exists(_SCUBA_PATH):
+        return
+    try:
+        with open(_SCUBA_PATH, "rb") as f:
+            await update.effective_message.reply_animation(f)
+    except Exception as exc:
+        log.warning("failed to send scuba reaction: %s", exc)
 
 
 def _resolve_media(msg, config: Config):
