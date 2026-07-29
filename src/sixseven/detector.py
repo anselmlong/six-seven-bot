@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass, field
 
 from . import media
-from .matcher import find_match
+from .matcher import find_matches
 from .ocr import OcrEngine
 from .vision import VisionEngine
 
@@ -51,12 +51,13 @@ class Detector:
         for i, frame in enumerate(frames):
             text = self._ocr.extract_text(frame)
             log.info("detect: ocr frame %d text=%r", i, text[:80] if text else "(empty)")
-            result = find_match(text)
-            if result.matched:
+            for result in find_matches(text):
                 kinds.add(result.kind)
-                log.info("detect: ocr match kind=%s snippet=%s", result.kind, result.snippet)
+                log.info("detect: ocr match kind=%s", result.kind)
                 if len(kinds) == 2:  # found both 67 and 69
                     break
+            if len(kinds) == 2:
+                break
 
         if kinds:
             return DetectionResult(True, kinds=sorted(kinds))

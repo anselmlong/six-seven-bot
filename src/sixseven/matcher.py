@@ -57,3 +57,16 @@ def find_match(text: str) -> MatchResult:
 
 def contains_six_seven(text: str) -> bool:
     return find_match(text).matched
+
+
+def find_matches(text: str) -> list[MatchResult]:
+    """Return all matches found in text (e.g. both '69' and '67')."""
+    if not text:
+        return []
+    normalized = _normalize(text)
+    results = []
+    if _ADJACENT_69.search(normalized):
+        results.append(MatchResult(True, kind="69"))
+    if _ADJACENT.search(normalized):
+        results.append(MatchResult(True, kind="67"))
+    return results
