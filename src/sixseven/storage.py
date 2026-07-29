@@ -235,3 +235,13 @@ class Storage:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def get_all_chat_ids(self) -> list[int]:
+        """Return all unique chat_ids the bot has ever seen."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT chat_id FROM counts "
+                "UNION "
+                "SELECT DISTINCT chat_id FROM chat_config"
+            ).fetchall()
+        return [r[0] for r in rows]

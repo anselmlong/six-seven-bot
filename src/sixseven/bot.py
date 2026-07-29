@@ -18,6 +18,7 @@ from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
+    ConversationHandler,
     MessageHandler,
     filters,
 )
@@ -44,6 +45,7 @@ _DETECT_MSGS = [
 _NOTIFY_MODES = {"instant", "daily", "quiet"}
 _RESET_SCHEDULES = {"off", "daily", "weekly", "monthly"}
 _CHANGELOG_CHATS = {495290408}  # anselm's DM
+_ANNOUNCE_MSG, _ANNOUNCE_CONFIRM = range(2)
 
 
 def build_application(config: Config, storage: Storage, detector: Detector) -> Application:
@@ -68,6 +70,24 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("changelog", cmd_changelog))
+
+    # Announce conversation (whitelisted only)
+    announce_conv = ConversationHandler(
+        entry_points=[CommandHandler("announce", cmd_announce)],
+        states={
+            _ANNOUNCE_MSG: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, announce_receive_message),
+                CommandHandler("cancel", announce_cancel),
+            ],
+            _ANNOUNCE_CONFIRM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, announce_confirm),
+                CommandHandler("cancel", announce_cancel),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", announce_cancel)],
+        name="announce_conversation",
+    )
+    app.add_handler(announce_conv)
 
     media_filter = (
         filters.PHOTO
@@ -259,6 +279,66 @@ async def cmd_changelog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• upgraded vision model to gpt-4o for better accuracy\n"
         "• both 69 and 67 — if an image contains both, both messages fire"
     )
+
+
+async def cmd_announce(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Start the announce flow (whitelisted only)."""
+    if update.effective_chat.id not in _CHANGELOG_CHATS:
+        return ConversationHandler.END
+    await update.effective_message.reply_text("send me the message to announce:")
+    return _ANNOUNCE_MSG
+
+
+async def announce_receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Save the message and send a test preview."""
+    msg = update.effective_message.text
+    context.bot_data["announce_msg"] = msg
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"[TEST] this is what will be sent:\n\n{msg}",
+    )
+    await update.effective_message.reply_text(
+        "reply 'confirm' to broadcast to all chats, or 'cancel' to stop."
+    )
+    return _ANNOUNCE_CONFIRM
+
+
+async def announce_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Broadcast the saved message to all known chats."""
+    text = update.effective_message.text.strip().lower()
+    if text not in ("confirm", "yes", "send", "y"):
+        await update.effective_message.reply_text("cancelled.")
+        return ConversationHandler.END
+
+    msg = context.bot_data.pop("announce_msg", None)
+    if not msg:
+        await update.effective_message.reply_text("nothing to announce.")
+        return ConversationHandler.END
+
+    storage: Storage = context.bot_data["storage"]
+    chat_ids = storage.get_all_chat_ids()
+
+    sent = 0
+    failed = 0
+    for cid in chat_ids:
+        try:
+            await context.bot.send_message(chat_id=cid, text=msg)
+            sent += 1
+            await asyncio.sleep(0.05)  # be nice to Telegram
+        except Exception:
+            failed += 1
+
+    await update.effective_message.reply_text(
+        f"done. sent to {sent} chat(s), {failed} failed."
+    )
+    return ConversationHandler.END
+
+
+async def announce_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancel the announce flow."""
+    context.bot_data.pop("announce_msg", None)
+    await update.effective_message.reply_text("cancelled.")
+    return ConversationHandler.END
 
 
 def _resolve_media(msg, config: Config):
