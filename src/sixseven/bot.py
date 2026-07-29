@@ -10,7 +10,7 @@ import random
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -81,7 +81,7 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     # Daily summary at 0000 SGT = 1600 UTC
     app.job_queue.run_daily(
         daily_summary,
-        time=time(hour=16, minute=0, tzinfo=timezone.utc),
+        time=datetime.time(hour=16, minute=0, tzinfo=timezone.utc),
         name="daily-67-summary",
     )
 
