@@ -97,7 +97,7 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
         | filters.ANIMATION
     )
     app.add_handler(MessageHandler(media_filter, on_media))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)\bscuba"), cmd_scuba))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)\bs+\s*c+\s*u+\s*b+\s*a+"), cmd_scuba))
     app.add_error_handler(on_error)
 
     # Daily summary at 0000 SGT = 1600 UTC
