@@ -42,6 +42,9 @@ class Config:
     db_path: str = "sixseven.db"
     # Telegram's Bot API caps bot downloads at 20 MB.
     max_file_mb: int = 20
+    # Sticker sent when someone says "son" (or a fuzzy variation). File ID is
+    # Telegram-side and must be captured from the sticker itself.
+    son_sticker_id: str = ""
 
     @property
     def vision_enabled(self) -> bool:
@@ -66,4 +69,5 @@ class Config:
             vision_max_frames=_int("SIXSEVEN_VISION_MAX_FRAMES", 1),
             db_path=os.getenv("SIXSEVEN_DB_PATH", "sixseven.db").strip(),
             max_file_mb=_int("SIXSEVEN_MAX_FILE_MB", 20),
+            son_sticker_id=os.getenv("SIXSEVEN_SON_STICKER_ID", "").strip(),
         )
