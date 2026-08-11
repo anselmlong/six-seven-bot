@@ -98,7 +98,7 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     )
     app.add_handler(MessageHandler(media_filter, on_media))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)\bs+\s*c+\s*u+\s*b+\s*a+"), cmd_scuba))
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)\bs+\s*o+\s*n+"), cmd_son))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)\bs+\s*o+\s*n+\b"), cmd_son))
     app.add_error_handler(on_error)
 
     # Daily summary at 0000 SGT = 1600 UTC
@@ -358,13 +358,29 @@ async def cmd_scuba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("failed to send scuba reaction: %s", exc)
 
 
+# Token match for the son sticker with a trailing word boundary. The boundary
+# filters out "s-on" prefixes of other words (song, sonic, sons, sonny, sonar);
+# "soon" is shape-identical to an emphatic SOOOOON so it's excluded explicitly.
+SON_TOKEN_RE = re.compile(r"(?i)(s+\s*o+\s*n+)\b")
+SON_EXCLUDED_WORDS = {"soon"}
+
+
 async def cmd_son(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send the 'Son' sticker when someone says 'son' (or a fuzzy variation)."""
+    msg = update.effective_message
+    if msg is None:
+        return
     config = context.bot_data.get("config")
     if not config or not getattr(config, "son_sticker_id", ""):
         return
+    text = msg.text or ""
+    m = SON_TOKEN_RE.search(text)
+    if not m:
+        return
+    if re.sub(r"\s+", "", m.group(1)).lower() in SON_EXCLUDED_WORDS:
+        return
     try:
-        await update.effective_message.reply_sticker(config.son_sticker_id)
+        await msg.reply_sticker(config.son_sticker_id)
     except Exception as exc:
         log.warning("failed to send son sticker: %s", exc)
 
