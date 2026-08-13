@@ -125,7 +125,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "video, and gif for 67. every time someone drops it, "
         "their counter goes up.\n\n"
         "commands:\n"
-        "• /top — who's the 67 goat in this chat\n"
+        "• /top — who's the 67 goat in this chat (/top full for everyone)\n"
         "• /me — your 67 count\n"
         "• /notify — change how you get notified\n"
         "• /reset — leaderboard reset (admin only)\n"
@@ -152,7 +152,12 @@ def _format_leaderboard(rows) -> str:
 
 async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     storage: Storage = context.bot_data["storage"]
-    rows = storage.leaderboard(update.effective_chat.id)
+    chat = update.effective_chat
+    if chat is None:
+        return
+    # "/top full" shows the whole leaderboard instead of the default top 10.
+    full = bool(context.args) and context.args[0].lower() == "full"
+    rows = storage.leaderboard(chat.id, limit=None if full else 10)
     await update.effective_message.reply_text(
         _format_leaderboard(rows), parse_mode=ParseMode.HTML
     )

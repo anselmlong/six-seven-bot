@@ -210,18 +210,19 @@ class Storage:
                 due.append(chat_id)
         return due
 
-    def leaderboard(self, chat_id: int, limit: int = 10) -> list[LeaderRow]:
+    def leaderboard(self, chat_id: int, limit: int | None = 10) -> list[LeaderRow]:
         with self._lock:
-            rows = self._conn.execute(
-                """
+            sql = """
                 SELECT user_id, display_name, username, count
                 FROM counts
                 WHERE chat_id = ?
                 ORDER BY count DESC, last_hit_at ASC
-                LIMIT ?
-                """,
-                (chat_id, limit),
-            ).fetchall()
+            """
+            params: list = [chat_id]
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = self._conn.execute(sql, params).fetchall()
         return [LeaderRow(r[0], r[1], r[2], int(r[3])) for r in rows]
 
     def user_count(self, chat_id: int, user_id: int) -> int:
