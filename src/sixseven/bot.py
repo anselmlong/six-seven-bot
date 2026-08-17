@@ -48,8 +48,8 @@ _NOTIFY_MODES = {"instant", "daily", "quiet"}
 _RESET_SCHEDULES = {"off", "daily", "weekly", "monthly"}
 _CHANGELOG_CHATS = {495290408}  # anselm's DM
 _ANNOUNCE_MSG, _ANNOUNCE_CONFIRM = range(2)
-_DISPUTE_TIMEOUT = 900  # a dispute auto-expires after 15 minutes
-_DISPUTE_THRESHOLD = 5  # fixed votes needed to overturn a point
+_DISPUTE_TIMEOUT = 300  # a dispute auto-expires after 5 minutes
+_DISPUTE_THRESHOLD = 3  # fixed votes needed to overturn a point
 
 
 def build_application(config: Config, storage: Storage, detector: Detector) -> Application:
