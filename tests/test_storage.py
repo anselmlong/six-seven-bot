@@ -70,7 +70,7 @@ def test_dispute_flow_and_half_majority(tmp_path):
     db = str(tmp_path / "t.db")
     store = Storage(db)
 
-    # 4 regulars -> threshold = max(2, 4 // 2 + 1) = 3
+    # 4 members have points; threshold is passed explicitly (fixed at 5 in the bot)
     store.increment(1, 100, "Alice", "alice")
     store.increment(1, 200, "Bob", "bob")
     store.increment(1, 300, "Cara", "cara")
@@ -81,7 +81,6 @@ def test_dispute_flow_and_half_majority(tmp_path):
     assert store.points_log_by_award(1, 777)["user_id"] == 400
     assert store.points_log_by_award(1, 999) is None
     assert store.points_log_by_id(log_id)["media_message_id"] == 555
-    assert store.regular_count(1) == 4
 
     # open a dispute on Dan's point
     d = store.open_dispute(1, log_id, 400, opened_by=100, threshold=3, expires_at=time.time() + 1000)
@@ -100,14 +99,3 @@ def test_dispute_flow_and_half_majority(tmp_path):
     store.decrement(1, 400)
     assert store.user_count(1, 400) == 0  # was 1, overturned
     assert store.dispute_vote(d["id"], 200) == "resolved"  # resolved blocks votes
-
-
-def test_threshold_min_for_small_groups(tmp_path):
-    db = str(tmp_path / "t.db")
-    store = Storage(db)
-
-    # Only the awardee has a point -> pool 1 -> threshold still min 2
-    _, log_id = store.increment(1, 100, "Alice", "alice")
-    assert store.regular_count(1) == 1
-    d = store.open_dispute(1, log_id, 100, opened_by=200, threshold=max(2, store.regular_count(1) // 2 + 1), expires_at=time.time() + 1000)
-    assert d["threshold"] == 2

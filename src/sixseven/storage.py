@@ -218,16 +218,6 @@ class Storage:
             ).fetchone()
         return dict(row) if row else None
 
-    def regular_count(self, chat_id: int) -> int:
-        """Distinct members with at least one point this period (vote pool)."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(DISTINCT user_id) FROM counts "
-                "WHERE chat_id = ? AND count > 0",
-                (chat_id,),
-            ).fetchone()
-        return int(row[0]) if row else 0
-
     # ---------- disputes ----------
     def open_dispute(
         self,

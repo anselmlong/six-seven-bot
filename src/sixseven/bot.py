@@ -49,6 +49,7 @@ _RESET_SCHEDULES = {"off", "daily", "weekly", "monthly"}
 _CHANGELOG_CHATS = {495290408}  # anselm's DM
 _ANNOUNCE_MSG, _ANNOUNCE_CONFIRM = range(2)
 _DISPUTE_TIMEOUT = 900  # a dispute auto-expires after 15 minutes
+_DISPUTE_THRESHOLD = 5  # fixed votes needed to overturn a point
 
 
 def build_application(config: Config, storage: Storage, detector: Detector) -> Application:
@@ -179,12 +180,6 @@ async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def _dispute_threshold(storage: Storage, chat_id: int) -> int:
-    """Half-majority of the chat's regulars (members with ≥1 point); min 2."""
-    pool = storage.regular_count(chat_id)
-    return max(2, pool // 2 + 1)
-
-
 async def _open_or_show_dispute(update: Update, context: ContextTypes.DEFAULT_TYPE, log: dict) -> None:
     storage: Storage = context.bot_data["storage"]
     user = update.effective_user
@@ -205,7 +200,7 @@ async def _open_or_show_dispute(update: Update, context: ContextTypes.DEFAULT_TY
     if existing:
         storage.set_dispute_resolved(existing["id"], "expired")
 
-    threshold = _dispute_threshold(storage, chat_id)
+    threshold = _DISPUTE_THRESHOLD
     dispute = storage.open_dispute(
         chat_id=chat_id,
         points_log_id=log["id"],
