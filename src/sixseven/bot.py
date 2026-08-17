@@ -13,10 +13,11 @@ import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as _dt_time, timezone
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -47,6 +48,7 @@ _NOTIFY_MODES = {"instant", "daily", "quiet"}
 _RESET_SCHEDULES = {"off", "daily", "weekly", "monthly"}
 _CHANGELOG_CHATS = {495290408}  # anselm's DM
 _ANNOUNCE_MSG, _ANNOUNCE_CONFIRM = range(2)
+_DISPUTE_TIMEOUT = 900  # a dispute auto-expires after 15 minutes
 
 
 def build_application(config: Config, storage: Storage, detector: Detector) -> Application:
@@ -70,6 +72,10 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("dispute", cmd_dispute))
+    app.add_handler(
+        CallbackQueryHandler(on_dispute_callback, pattern=r"^(dispute:|vote:)")
+    )
     app.add_handler(CommandHandler("changelog", cmd_changelog))
 
     # Announce conversation (whitelisted only)
@@ -171,6 +177,142 @@ async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"you've dropped 67 {count} time{'s' if count != 1 else ''}. "
         f"{'keep going 🫡' if count > 0 else 'go touch grass and find 67'}"
     )
+
+
+def _dispute_threshold(storage: Storage, chat_id: int) -> int:
+    """Half-majority of the chat's regulars (members with ≥1 point); min 2."""
+    pool = storage.regular_count(chat_id)
+    return max(2, pool // 2 + 1)
+
+
+async def _open_or_show_dispute(update: Update, context: ContextTypes.DEFAULT_TYPE, log: dict) -> None:
+    storage: Storage = context.bot_data["storage"]
+    user = update.effective_user
+    if user is None:
+        return
+    chat_id = log["chat_id"]
+    awardee = log["user_id"]
+    if user.id == awardee:
+        await update.effective_message.reply_text("you can't dispute your own point 😅")
+        return
+
+    existing = storage.get_open_dispute(chat_id, log["id"])
+    if existing and _time.time() < existing["expires_at"]:
+        await update.effective_message.reply_text(
+            f"⚖️ dispute already open — {storage.dispute_vote_count(existing['id'])}/{existing['threshold']} votes to overturn"
+        )
+        return
+    if existing:
+        storage.set_dispute_resolved(existing["id"], "expired")
+
+    threshold = _dispute_threshold(storage, chat_id)
+    dispute = storage.open_dispute(
+        chat_id=chat_id,
+        points_log_id=log["id"],
+        target_user_id=awardee,
+        opened_by=user.id,
+        threshold=threshold,
+        expires_at=_time.time() + _DISPUTE_TIMEOUT,
+    )
+    name = log["display_name"] or (f"@{log['username']}" if log["username"] else "someone")
+    await update.effective_message.reply_text(
+        f"⚖️ dispute: is {html.escape(name)}'s 67 legit? {threshold} votes to overturn",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🗳 Overturn", callback_data=f"vote:{dispute['id']}")]]
+        ),
+    )
+
+
+async def cmd_dispute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    user = update.effective_user
+    if msg is None or user is None:
+        return
+    reply = msg.reply_to_message
+    if reply is None:
+        await msg.reply_text("reply to a 67 award message with /dispute to challenge the point.")
+        return
+    storage: Storage = context.bot_data["storage"]
+    log = storage.points_log_by_award(msg.chat_id, reply.message_id)
+    if log is None:
+        await msg.reply_text("that message isn't a 67 award I can dispute.")
+        return
+    await _open_or_show_dispute(update, context, log)
+
+
+async def on_dispute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    storage: Storage = context.bot_data["storage"]
+    q = update.callback_query
+    await q.answer()
+    user = update.effective_user
+    if user is None or q.data is None:
+        return
+    data = q.data
+
+    if data.startswith("dispute:"):
+        try:
+            log_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        log = storage.points_log_by_id(log_id)
+        if log is None:
+            await q.answer("that point is gone")
+            return
+        await _open_or_show_dispute(update, context, log)
+        return
+
+    if data.startswith("vote:"):
+        try:
+            dispute_id = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        dispute = storage.get_dispute(dispute_id)
+        if dispute is None:
+            await q.answer("dispute not found")
+            return
+        if dispute["status"] != "open":
+            await q.answer("this dispute is already resolved")
+            return
+        if _time.time() > dispute["expires_at"]:
+            storage.set_dispute_resolved(dispute_id, "expired")
+            await q.edit_message_text("this dispute expired without enough votes.")
+            return
+        if user.id == dispute["target_user_id"]:
+            await q.answer("you can't vote on your own point")
+            return
+
+        outcome = storage.dispute_vote(dispute_id, user.id)
+        if outcome == "already_voted":
+            await q.answer("you already voted")
+            return
+
+        votes = storage.dispute_vote_count(dispute_id)
+        threshold = dispute["threshold"]
+        if votes >= threshold:
+            storage.set_dispute_resolved(dispute_id, "overturned")
+            storage.decrement(dispute["chat_id"], dispute["target_user_id"])
+            log = storage.points_log_by_id(dispute["points_log_id"])
+            if log and log.get("award_message_id"):
+                try:
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=dispute["chat_id"],
+                        message_id=log["award_message_id"],
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass  # award message may have been deleted
+            await q.edit_message_text(
+                "🧾 point overturned — the group decided it wasn't a 67. −1 ✅"
+            )
+        else:
+            await q.answer(f"vote counted ({votes}/{threshold})")
+            await q.edit_message_text(
+                f"⚖️ dispute — {votes}/{threshold} votes to overturn",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🗳 Overturn", callback_data=f"vote:{dispute_id}")]]
+                ),
+            )
+        return
 
 
 async def cmd_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -464,11 +606,12 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("69. nice 😎👍")
 
     if "67" in kinds:
-        new_count = storage.increment(
+        new_count, log_id = storage.increment(
             update.effective_chat.id,
             user.id,
             user.full_name,
             user.username or "",
+            media_message_id=msg.message_id,
         )
 
         # Check notify mode
@@ -478,13 +621,20 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if mode == "daily":
             return  # daily summary handled by the scheduled job
 
-        # instant mode — reply right away
+        # instant mode — reply right away with a dispute affordance
         plural = "s" if new_count != 1 else ""
         mention = user.mention_html()
         msg_text = random.choice(_DETECT_MSGS).format(
             user=mention, count=new_count, plural=plural
         )
-        await msg.reply_text(msg_text, parse_mode=ParseMode.HTML)
+        award = await msg.reply_text(
+            msg_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⚖️ Dispute", callback_data=f"dispute:{log_id}")]]
+            ),
+        )
+        storage.update_award_message(log_id, award.message_id)
 
 
 async def auto_reset_check(context: ContextTypes.DEFAULT_TYPE) -> None:

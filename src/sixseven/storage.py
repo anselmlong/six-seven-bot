@@ -23,6 +23,7 @@ class Storage:
     def __init__(self, db_path: str) -> None:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS counts (
@@ -57,6 +58,55 @@ class Storage:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_processed_messages_cleanup "
             "ON processed_messages (processed_at)"
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS points_log (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id          INTEGER NOT NULL,
+                media_message_id INTEGER NOT NULL,
+                award_message_id INTEGER NOT NULL DEFAULT 0,
+                user_id          INTEGER NOT NULL,
+                display_name     TEXT    NOT NULL DEFAULT '',
+                username         TEXT    NOT NULL DEFAULT '',
+                created_at       REAL    NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS disputes (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                points_log_id  INTEGER NOT NULL,
+                chat_id        INTEGER NOT NULL,
+                target_user_id INTEGER NOT NULL,
+                opened_by      INTEGER NOT NULL,
+                threshold      INTEGER NOT NULL,
+                status         TEXT    NOT NULL DEFAULT 'open',
+                created_at     REAL    NOT NULL,
+                expires_at     REAL    NOT NULL,
+                resolved_at    REAL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dispute_votes (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispute_id    INTEGER NOT NULL,
+                voter_user_id INTEGER NOT NULL,
+                voted_at      REAL    NOT NULL,
+                UNIQUE (dispute_id, voter_user_id)
+            )
+            """
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_points_log_award "
+            "ON points_log (chat_id, award_message_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_disputes_open "
+            "ON disputes (points_log_id, status)"
         )
         # Migrate existing chat_config rows to add reset columns
         try:
@@ -104,8 +154,14 @@ class Storage:
         user_id: int,
         display_name: str,
         username: str,
-    ) -> int:
-        """Add one to a member's counter and return their new total."""
+        media_message_id: int = 0,
+        award_message_id: int = 0,
+    ) -> tuple[int, int]:
+        """Add one to a member's counter and log the individual point.
+
+        Returns (new_total, points_log_id). The log id anchors disputes so a
+        specific point (not just a raw -1) can be overturned later.
+        """
         now = time.time()
         with self._lock:
             self._conn.execute(
@@ -119,6 +175,144 @@ class Storage:
                     last_hit_at = excluded.last_hit_at
                 """,
                 (chat_id, user_id, username, display_name, now),
+            )
+            cur = self._conn.execute(
+                """
+                INSERT INTO points_log
+                    (chat_id, media_message_id, award_message_id, user_id,
+                     display_name, username, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (chat_id, media_message_id, award_message_id, user_id,
+                 display_name, username, now),
+            )
+            log_id = int(cur.lastrowid or 0)
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT count FROM counts WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            ).fetchone()
+        return int(row[0]) if row else 0, log_id
+
+    # ---------- points log ----------
+    def update_award_message(self, log_id: int, award_message_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE points_log SET award_message_id = ? WHERE id = ?",
+                (award_message_id, log_id),
+            )
+            self._conn.commit()
+
+    def points_log_by_id(self, log_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM points_log WHERE id = ?", (log_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def points_log_by_award(self, chat_id: int, award_message_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM points_log WHERE chat_id = ? AND award_message_id = ?",
+                (chat_id, award_message_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def regular_count(self, chat_id: int) -> int:
+        """Distinct members with at least one point this period (vote pool)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(DISTINCT user_id) FROM counts "
+                "WHERE chat_id = ? AND count > 0",
+                (chat_id,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    # ---------- disputes ----------
+    def open_dispute(
+        self,
+        chat_id: int,
+        points_log_id: int,
+        target_user_id: int,
+        opened_by: int,
+        threshold: int,
+        expires_at: float,
+    ) -> dict:
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO disputes
+                    (points_log_id, chat_id, target_user_id, opened_by,
+                     threshold, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (points_log_id, chat_id, target_user_id, opened_by,
+                 threshold, now, expires_at),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM disputes WHERE id = ?", (cur.lastrowid,)
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def get_dispute(self, dispute_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM disputes WHERE id = ?", (dispute_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_open_dispute(self, chat_id: int, points_log_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM disputes WHERE chat_id = ? AND points_log_id = ? "
+                "AND status = 'open' ORDER BY id DESC LIMIT 1",
+                (chat_id, points_log_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def dispute_vote(self, dispute_id: int, voter_user_id: int) -> str:
+        """Register one vote. Returns 'already_voted', 'resolved', or 'voted'."""
+        with self._lock:
+            d = self._conn.execute(
+                "SELECT status FROM disputes WHERE id = ?", (dispute_id,)
+            ).fetchone()
+            if d is None:
+                return "resolved"
+            if d["status"] != "open":
+                return "resolved"
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO dispute_votes (dispute_id, voter_user_id, voted_at) "
+                "VALUES (?, ?, ?)",
+                (dispute_id, voter_user_id, time.time()),
+            )
+            self._conn.commit()
+        return "already_voted" if cur.rowcount == 0 else "voted"
+
+    def dispute_vote_count(self, dispute_id: int) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM dispute_votes WHERE dispute_id = ?",
+                (dispute_id,),
+            ).fetchone()
+        return int(row["n"])
+
+    def set_dispute_resolved(self, dispute_id: int, status: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE disputes SET status = ?, resolved_at = ? WHERE id = ?",
+                (status, time.time(), dispute_id),
+            )
+            self._conn.commit()
+
+    def decrement(self, chat_id: int, user_id: int) -> int:
+        """Remove one point from a member (floor 0); returns the new total."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE counts SET count = MAX(count - 1, 0) "
+                "WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
             )
             self._conn.commit()
             row = self._conn.execute(

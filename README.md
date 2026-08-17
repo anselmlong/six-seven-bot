@@ -28,6 +28,7 @@ set, the bot runs OCR-only.
 | `/me` | Your own count |
 | `/notify` | Change notification mode (instant, daily, quiet) |
 | `/reset` | Reset leaderboard — manual or auto (admin only) |
+| `/dispute` | Reply to a 67 award to challenge it → group vote (half-majority overturns the point) |
 | `/start`, `/help` | How the bot works |
 
 ### Reset options

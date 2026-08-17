@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -10,9 +11,10 @@ def test_increment_and_leaderboard(tmp_path):
     db = str(tmp_path / "t.db")
     store = Storage(db)
 
-    assert store.increment(1, 100, "Alice", "alice") == 1
-    assert store.increment(1, 100, "Alice", "alice") == 2
-    assert store.increment(1, 200, "Bob", "bob") == 1
+    c1, _ = store.increment(1, 100, "Alice", "alice")
+    c2, _ = store.increment(1, 100, "Alice", "alice")
+    c3, _ = store.increment(1, 200, "Bob", "bob")
+    assert (c1, c2, c3) == (1, 2, 1)
 
     assert store.user_count(1, 100) == 2
     assert store.user_count(1, 999) == 0
@@ -62,3 +64,50 @@ def test_is_first_time_dedup(tmp_path):
     assert store2.is_first_time(1, 999) is True   # new message
 
     store2.close()
+
+
+def test_dispute_flow_and_half_majority(tmp_path):
+    db = str(tmp_path / "t.db")
+    store = Storage(db)
+
+    # 4 regulars -> threshold = max(2, 4 // 2 + 1) = 3
+    store.increment(1, 100, "Alice", "alice")
+    store.increment(1, 200, "Bob", "bob")
+    store.increment(1, 300, "Cara", "cara")
+    _, log_id = store.increment(1, 400, "Dan", "dan", media_message_id=555, award_message_id=777)
+    store.update_award_message(log_id, 777)
+
+    # award lookups
+    assert store.points_log_by_award(1, 777)["user_id"] == 400
+    assert store.points_log_by_award(1, 999) is None
+    assert store.points_log_by_id(log_id)["media_message_id"] == 555
+    assert store.regular_count(1) == 4
+
+    # open a dispute on Dan's point
+    d = store.open_dispute(1, log_id, 400, opened_by=100, threshold=3, expires_at=time.time() + 1000)
+    assert d["status"] == "open"
+    assert store.get_open_dispute(1, log_id)["id"] == d["id"]
+
+    # voting: one vote per user, deduped
+    assert store.dispute_vote(d["id"], 100) == "voted"
+    assert store.dispute_vote(d["id"], 100) == "already_voted"
+    assert store.dispute_vote(d["id"], 200) == "voted"
+    assert store.dispute_vote(d["id"], 300) == "voted"
+    assert store.dispute_vote_count(d["id"]) == 3
+
+    # threshold reached -> overturn
+    store.set_dispute_resolved(d["id"], "overturned")
+    store.decrement(1, 400)
+    assert store.user_count(1, 400) == 0  # was 1, overturned
+    assert store.dispute_vote(d["id"], 200) == "resolved"  # resolved blocks votes
+
+
+def test_threshold_min_for_small_groups(tmp_path):
+    db = str(tmp_path / "t.db")
+    store = Storage(db)
+
+    # Only the awardee has a point -> pool 1 -> threshold still min 2
+    _, log_id = store.increment(1, 100, "Alice", "alice")
+    assert store.regular_count(1) == 1
+    d = store.open_dispute(1, log_id, 100, opened_by=200, threshold=max(2, store.regular_count(1) // 2 + 1), expires_at=time.time() + 1000)
+    assert d["threshold"] == 2
