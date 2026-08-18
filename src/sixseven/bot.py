@@ -204,10 +204,16 @@ async def _open_or_show_dispute(update: Update, context: ContextTypes.DEFAULT_TY
 
     existing = storage.get_open_dispute(chat_id, log["id"])
     if existing and _time.time() < existing["expires_at"]:
-        await update.effective_message.reply_text(
-            "a dispute is already open:\n"
-            + _format_vote_status(storage, existing, storage.dispute_vote_count(existing["id"]))
+        status = _format_vote_status(
+            storage, existing, storage.dispute_vote_count(existing["id"])
         )
+        if update.callback_query is not None:
+            # Button spam guard: toast only, never a fresh message.
+            await update.callback_query.answer(f"dispute already open — {status}")
+        else:
+            await update.effective_message.reply_text(
+                "a dispute is already open:\n" + status
+            )
         return
     if existing:
         storage.set_dispute_resolved(existing["id"], "expired")
@@ -316,6 +322,7 @@ async def on_dispute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             storage.set_dispute_resolved(dispute_id, "overturned")
             new_count = storage.decrement(dispute["chat_id"], dispute["target_user_id"])
             log = storage.points_log_by_id(dispute["points_log_id"])
+            # Clear the award's "being disputed" badge.
             if log and log.get("award_message_id"):
                 try:
                     await context.bot.edit_message_reply_markup(
@@ -325,13 +332,26 @@ async def on_dispute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     )
                 except Exception:
                     pass  # award message may have been deleted
-            name = log["username"] if log and log["username"] else (
-                log["display_name"] if log else "someone"
+            # Strip the vote button so the counter stays as a record.
+            try:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            # Fresh announcement, tagging the player's name (not @username).
+            record = log or {}
+            name = record.get("display_name") or (
+                f"@{record['username']}" if record.get("username") else "someone"
             )
-            mention = html.escape(name)
-            await q.edit_message_text(
-                f"@{mention}'s 67 is deemed illegitimate! @{mention} now has {new_count} 67s (-1)"
+            link = (
+                f'<a href="tg://user?id={dispute["target_user_id"]}">'
+                f"{html.escape(str(name))}</a>"
             )
+            await context.bot.send_message(
+                chat_id=dispute["chat_id"],
+                text=f"{link}'s 67 is deemed illegitimate! {link} now has {new_count} 67s (-1)",
+                parse_mode=ParseMode.HTML,
+            )
+            await q.answer("point overturned")
         else:
             await q.answer(f"vote counted ({votes}/{threshold})")
             await q.edit_message_text(
