@@ -221,6 +221,21 @@ async def _open_or_show_dispute(update: Update, context: ContextTypes.DEFAULT_TY
         threshold=threshold,
         expires_at=_time.time() + _DISPUTE_TIMEOUT,
     )
+    # Flip the original award's button so the chat can see it's under dispute.
+    if log.get("award_message_id"):
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=log["award_message_id"],
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(
+                        "⚖️ Being disputed…",
+                        callback_data=f"dispute:{log['id']}",
+                    )]]
+                ),
+            )
+        except Exception:
+            pass
     name = log["display_name"] or (f"@{log['username']}" if log["username"] else "someone")
     await update.effective_message.reply_text(
         f"⚖️ dispute: is {html.escape(name)}'s 67 legit? {threshold} votes to overturn",
