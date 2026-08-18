@@ -299,7 +299,7 @@ async def on_dispute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         threshold = dispute["threshold"]
         if votes >= threshold:
             storage.set_dispute_resolved(dispute_id, "overturned")
-            storage.decrement(dispute["chat_id"], dispute["target_user_id"])
+            new_count = storage.decrement(dispute["chat_id"], dispute["target_user_id"])
             log = storage.points_log_by_id(dispute["points_log_id"])
             if log and log.get("award_message_id"):
                 try:
@@ -310,8 +310,12 @@ async def on_dispute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     )
                 except Exception:
                     pass  # award message may have been deleted
+            name = log["username"] if log and log["username"] else (
+                log["display_name"] if log else "someone"
+            )
+            mention = html.escape(name)
             await q.edit_message_text(
-                "🧾 point overturned — the group decided it wasn't a 67. −1 ✅"
+                f"@{mention}'s 67 is deemed illegitimate! @{mention} now has {new_count} 67s (-1)"
             )
         else:
             await q.answer(f"vote counted ({votes}/{threshold})")
