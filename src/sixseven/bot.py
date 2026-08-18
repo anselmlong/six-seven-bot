@@ -180,6 +180,17 @@ async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _format_vote_status(storage: Storage, dispute: dict, votes: int) -> str:
+    """Dispute progress + who has voted so far."""
+    threshold = dispute["threshold"]
+    names = []
+    for v in storage.dispute_voters(dispute["id"]):
+        n = v["display_name"] or (f"@{v['username']}" if v["username"] else "someone")
+        names.append(html.escape(n))
+    line = ("\n🗳 voted: " + ", ".join(names)) if names else ""
+    return f"⚖️ dispute — {votes}/{threshold} votes to overturn{line}"
+
+
 async def _open_or_show_dispute(update: Update, context: ContextTypes.DEFAULT_TYPE, log: dict) -> None:
     storage: Storage = context.bot_data["storage"]
     user = update.effective_user
@@ -194,7 +205,8 @@ async def _open_or_show_dispute(update: Update, context: ContextTypes.DEFAULT_TY
     existing = storage.get_open_dispute(chat_id, log["id"])
     if existing and _time.time() < existing["expires_at"]:
         await update.effective_message.reply_text(
-            f"⚖️ dispute already open — {storage.dispute_vote_count(existing['id'])}/{existing['threshold']} votes to overturn"
+            "a dispute is already open:\n"
+            + _format_vote_status(storage, existing, storage.dispute_vote_count(existing["id"]))
         )
         return
     if existing:
@@ -276,7 +288,9 @@ async def on_dispute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await q.answer("you can't vote on your own point")
             return
 
-        outcome = storage.dispute_vote(dispute_id, user.id)
+        outcome = storage.dispute_vote(
+            dispute_id, user.id, user.full_name or "", user.username or ""
+        )
         if outcome == "already_voted":
             await q.answer("you already voted")
             return
@@ -302,7 +316,7 @@ async def on_dispute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             await q.answer(f"vote counted ({votes}/{threshold})")
             await q.edit_message_text(
-                f"⚖️ dispute — {votes}/{threshold} votes to overturn",
+                _format_vote_status(storage, dispute, votes),
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("🗳 Overturn", callback_data=f"vote:{dispute_id}")]]
                 ),

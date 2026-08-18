@@ -95,11 +95,22 @@ class Storage:
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 dispute_id    INTEGER NOT NULL,
                 voter_user_id INTEGER NOT NULL,
+                display_name  TEXT    NOT NULL DEFAULT '',
+                username      TEXT    NOT NULL DEFAULT '',
                 voted_at      REAL    NOT NULL,
                 UNIQUE (dispute_id, voter_user_id)
             )
             """
         )
+        # Migrate existing dispute_votes tables to add voter names
+        for col in (
+            "display_name TEXT NOT NULL DEFAULT ''",
+            "username TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                self._conn.execute(f"ALTER TABLE dispute_votes ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_points_log_award "
             "ON points_log (chat_id, award_message_id)"
@@ -262,7 +273,13 @@ class Storage:
             ).fetchone()
         return dict(row) if row else None
 
-    def dispute_vote(self, dispute_id: int, voter_user_id: int) -> str:
+    def dispute_vote(
+        self,
+        dispute_id: int,
+        voter_user_id: int,
+        display_name: str = "",
+        username: str = "",
+    ) -> str:
         """Register one vote. Returns 'already_voted', 'resolved', or 'voted'."""
         with self._lock:
             d = self._conn.execute(
@@ -273,9 +290,10 @@ class Storage:
             if d["status"] != "open":
                 return "resolved"
             cur = self._conn.execute(
-                "INSERT OR IGNORE INTO dispute_votes (dispute_id, voter_user_id, voted_at) "
-                "VALUES (?, ?, ?)",
-                (dispute_id, voter_user_id, time.time()),
+                "INSERT OR IGNORE INTO dispute_votes "
+                "(dispute_id, voter_user_id, display_name, username, voted_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (dispute_id, voter_user_id, display_name, username, time.time()),
             )
             self._conn.commit()
         return "already_voted" if cur.rowcount == 0 else "voted"
@@ -287,6 +305,16 @@ class Storage:
                 (dispute_id,),
             ).fetchone()
         return int(row["n"])
+
+    def dispute_voters(self, dispute_id: int) -> list[dict]:
+        """Distinct voters with their display names, in vote order."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT voter_user_id, display_name, username "
+                "FROM dispute_votes WHERE dispute_id = ? ORDER BY voted_at ASC",
+                (dispute_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def set_dispute_resolved(self, dispute_id: int, status: str) -> None:
         with self._lock:

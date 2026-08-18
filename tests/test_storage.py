@@ -87,12 +87,13 @@ def test_dispute_flow_and_half_majority(tmp_path):
     assert d["status"] == "open"
     assert store.get_open_dispute(1, log_id)["id"] == d["id"]
 
-    # voting: one vote per user, deduped
-    assert store.dispute_vote(d["id"], 100) == "voted"
-    assert store.dispute_vote(d["id"], 100) == "already_voted"
-    assert store.dispute_vote(d["id"], 200) == "voted"
-    assert store.dispute_vote(d["id"], 300) == "voted"
+    # voting: one vote per user, deduped, with names recorded
+    assert store.dispute_vote(d["id"], 100, "Alice", "alice") == "voted"
+    assert store.dispute_vote(d["id"], 100, "Alice", "alice") == "already_voted"
+    assert store.dispute_vote(d["id"], 200, "Bob", "bob") == "voted"
+    assert store.dispute_vote(d["id"], 300, "Cara", "cara") == "voted"
     assert store.dispute_vote_count(d["id"]) == 3
+    assert [v["display_name"] for v in store.dispute_voters(d["id"])] == ["Alice", "Bob", "Cara"]
 
     # threshold reached -> overturn
     store.set_dispute_resolved(d["id"], "overturned")
