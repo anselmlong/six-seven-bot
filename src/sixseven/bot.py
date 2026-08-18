@@ -698,12 +698,15 @@ async def auto_reset_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     storage: Storage = context.bot_data["storage"]
     now = _time.time()
     for chat_id in storage.get_chats_due_for_reset(now):
+        # Capture the final standings before wiping so the chat sees who won.
+        rows = storage.leaderboard(chat_id, limit=10)
         storage.reset_leaderboard(chat_id)
         log.info("auto-reset leaderboard for chat %d", chat_id)
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="leaderboard auto-reset. everyone starts fresh 🫡",
+                text=_format_reset_message(rows),
+                parse_mode=ParseMode.HTML,
             )
         except Exception as exc:
             log.warning("failed to notify chat %d of reset: %s", chat_id, exc)
@@ -722,6 +725,22 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             except Exception as exc:
                 log.warning("failed to send daily summary to %d: %s", chat_id, exc)
+
+
+def _format_reset_message(rows) -> str:
+    """Final standings + reset note, broadcast when a leaderboard auto-resets."""
+    if not rows:
+        return "leaderboard reset — everyone starts fresh 🫡"
+    lines = ["🏁 67 period's final leaderboard:"]
+    for i, row in enumerate(rows):
+        medal = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
+        name = html.escape(
+            row.display_name or (f"@{row.username}" if row.username else "Someone")
+        )
+        lines.append(f"{medal} {name} — {row.count} 67s")
+    lines.append("")
+    lines.append("leaderboard reset — everyone starts fresh 🫡")
+    return "\n".join(lines)
 
 
 def _format_daily_summary(rows) -> str:
