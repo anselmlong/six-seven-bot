@@ -698,8 +698,8 @@ async def auto_reset_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     storage: Storage = context.bot_data["storage"]
     now = _time.time()
     for chat_id in storage.get_chats_due_for_reset(now):
-        # Capture the final standings before wiping so the chat sees who won.
-        rows = storage.leaderboard(chat_id, limit=10)
+        # Capture the full final standings before wiping so the chat sees who won.
+        rows = storage.leaderboard(chat_id, limit=None)
         storage.reset_leaderboard(chat_id)
         log.info("auto-reset leaderboard for chat %d", chat_id)
         try:
