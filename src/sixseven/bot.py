@@ -336,9 +336,13 @@ async def on_dispute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     )
                 except Exception:
                     pass  # award message may have been deleted
-            # Strip the vote button so the counter stays as a record.
+            # Freeze the vote counter at the final tally (incl. the last voter),
+            # then drop the button so it reads as a closed record.
             try:
-                await q.edit_message_reply_markup(reply_markup=None)
+                await q.edit_message_text(
+                    _format_vote_status(storage, dispute, storage.dispute_vote_count(dispute_id)),
+                    reply_markup=None,
+                )
             except Exception:
                 pass
             # Fresh announcement, tagging the player's name (not @username).
