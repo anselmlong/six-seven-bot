@@ -199,7 +199,11 @@ async def _open_or_show_dispute(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = log["chat_id"]
     awardee = log["user_id"]
     if user.id == awardee:
-        await update.effective_message.reply_text("you can't dispute your own point 😅")
+        if update.callback_query is not None:
+            # Button spam guard: toast only, never a fresh message.
+            await update.callback_query.answer("you can't dispute your own point")
+        else:
+            await update.effective_message.reply_text("you can't dispute your own point 😅")
         return
 
     existing = storage.get_open_dispute(chat_id, log["id"])
