@@ -170,22 +170,22 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if chat is None:
         return
     # Arg routing: "global" = cross-chat top 10, "full" = whole local board,
-        # nothing = local top 10.
-        arg = context.args[0].lower() if context.args else ""
-        if arg == "global":
-            rows = storage.global_leaderboard(limit=10)
-            text = "\n".join(
-                [_format_leaderboard_line(rows, i) for i in range(len(rows))]
-            )
-            text = "🌍 global 67 leaderboard (all chats)\n\n" + text if rows else (
-                "🌍 global 67 leaderboard (all chats)\n\nno 67s across chats yet 🫡"
-            )
-            await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
-            return
-        rows = storage.leaderboard(chat.id, limit=None if arg == "full" else 10)
-        await update.effective_message.reply_text(
-            _format_leaderboard(rows), parse_mode=ParseMode.HTML
+    # nothing = local top 10.
+    arg = context.args[0].lower() if context.args else ""
+    if arg == "global":
+        rows = storage.global_leaderboard(limit=10)
+        text = "\n".join(
+            [_format_leaderboard_line(rows, i) for i in range(len(rows))]
         )
+        text = "🌍 global 67 leaderboard (all chats)\n\n" + text if rows else (
+            "🌍 global 67 leaderboard (all chats)\n\nno 67s across chats yet 🫡"
+        )
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+        return
+    rows = storage.leaderboard(chat.id, limit=None if arg == "full" else 10)
+    await update.effective_message.reply_text(
+        _format_leaderboard(rows), parse_mode=ParseMode.HTML
+    )
 
 
 async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
