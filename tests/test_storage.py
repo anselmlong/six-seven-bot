@@ -100,3 +100,44 @@ def test_dispute_flow_and_half_majority(tmp_path):
     store.decrement(1, 400)
     assert store.user_count(1, 400) == 0  # was 1, overturned
     assert store.dispute_vote(d["id"], 200) == "resolved"  # resolved blocks votes
+
+
+def test_global_leaderboard_sums_across_chats(tmp_path):
+    db = str(tmp_path / "t.db")
+    store = Storage(db)
+
+    # Alice: 2 in chat1 + 1 in chat2 = 3 total
+    store.increment(1, 100, "Alice", "alice")
+    store.increment(1, 100, "Alice", "alice")
+    store.increment(2, 100, "Alice", "alice")
+    # Bob: 5 in one chat
+    for _ in range(5):
+        store.increment(1, 200, "Bob", "bob")
+
+    rows = store.global_leaderboard(limit=None)
+    by_id = {r.user_id: r for r in rows}
+    # Alice summed across both chats
+    assert by_id[100].count == 3
+    assert by_id[100].display_name == "Alice"
+    # Bob 5 > Alice 3, so Bob ranks first
+    assert rows[0].user_id == 200
+    assert rows[0].count == 5
+
+
+def test_global_leaderboard_name_from_highest_occurrence(tmp_path):
+    db = str(tmp_path / "t.db")
+    store = Storage(db)
+
+    # Same user in two chats under different names — the higher-count one wins.
+    store.increment(1, 100, "Alice", "alice")
+    store.increment(1, 100, "Alice", "alice")   # chat1 has 2
+    store.increment(2, 100, "Al", "al")         # chat2 has 1
+    row = store.global_leaderboard(limit=None)[0]
+    assert row.count == 3
+    assert row.display_name == "Alice"
+
+
+def test_global_leaderboard_empty(tmp_path):
+    db = str(tmp_path / "t.db")
+    store = Storage(db)
+    assert store.global_leaderboard(limit=None) == []

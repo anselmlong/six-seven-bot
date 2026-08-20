@@ -437,6 +437,40 @@ class Storage:
             rows = self._conn.execute(sql, params).fetchall()
         return [LeaderRow(r[0], r[1], r[2], int(r[3])) for r in rows]
 
+    def global_leaderboard(self, limit: int | None = 20) -> list[LeaderRow]:
+        """Standings across every chat, per user.
+
+        Sums each user's count across all chats; the displayed name/username is
+        taken from their highest-count occurrence (their most distinctive 67 run).
+        """
+        with self._lock:
+            sql = """
+                WITH ranked AS (
+                    SELECT user_id, display_name, username, count, last_hit_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY user_id
+                               ORDER BY count DESC, last_hit_at DESC
+                           ) AS rn
+                    FROM counts
+                ),
+                totals AS (
+                    SELECT user_id, SUM(count) AS total, MAX(last_hit_at) AS last_hit
+                    FROM counts
+                    GROUP BY user_id
+                )
+                SELECT r.user_id, r.display_name, r.username, t.total AS count, t.last_hit
+                FROM ranked r
+                JOIN totals t ON t.user_id = r.user_id
+                WHERE r.rn = 1
+                ORDER BY t.total DESC, t.last_hit ASC
+            """
+            params: list = []
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = self._conn.execute(sql, params).fetchall()
+        return [LeaderRow(r[0], r[1], r[2], int(r[3])) for r in rows]
+
     def user_count(self, chat_id: int, user_id: int) -> int:
         with self._lock:
             row = self._conn.execute(

@@ -70,6 +70,7 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("top", cmd_top))
+    app.add_handler(CommandHandler("topglobal", cmd_topglobal))
     app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("reset", cmd_reset))
@@ -134,6 +135,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "commands:\n"
         "• /top — who's the 67 goat in this chat\n"
         "• /top full — the whole leaderboard\n"
+        "• /topglobal — the goat across every chat\n"
         "• /me — your 67 count\n"
         "• /notify — change how you get notified\n"
         "• /reset — leaderboard reset (admin only)\n"
@@ -147,14 +149,30 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("unhandled error while processing an update", exc_info=context.error)
 
 
+async def cmd_topglobal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    storage: Storage = context.bot_data["storage"]
+    rows = storage.global_leaderboard(limit=None)
+    header = "🌍 global 67 leaderboard (all chats)"
+    text = "\n".join(
+        [_format_leaderboard_line(rows, i) for i in range(len(rows))]
+    )
+    text = header + "\n\n" + text if rows else header + "\n\nno 67s across chats yet 🫡"
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+def _format_leaderboard_line(rows, i: int) -> str:
+    row = rows[i]
+    medal = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
+    name = html.escape(row.display_name or (f"@{row.username}" if row.username else "Someone"))
+    return f"{medal} {name} — {row.count} 67s"
+
+
 def _format_leaderboard(rows) -> str:
     if not rows:
         return "no 67s yet. skill issue 🫡"
     lines = ["67 leaderboard (who's the goat)", ""]
-    for i, row in enumerate(rows):
-        medal = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
-        name = html.escape(row.display_name or (f"@{row.username}" if row.username else "Someone"))
-        lines.append(f"{medal} {name} — {row.count} 67s")
+    for i, _row in enumerate(rows):
+        lines.append(_format_leaderboard_line(rows, i))
     return "\n".join(lines)
 
 
