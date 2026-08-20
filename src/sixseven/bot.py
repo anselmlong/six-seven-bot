@@ -70,7 +70,6 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("top", cmd_top))
-    app.add_handler(CommandHandler("topglobal", cmd_topglobal))
     app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("reset", cmd_reset))
@@ -134,8 +133,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "their counter goes up.\n\n"
         "commands:\n"
         "• /top — who's the 67 goat in this chat\n"
-        "• /top full — the whole leaderboard\n"
-        "• /topglobal — the goat across every chat\n"
+        "• /top full — the whole leaderboard here\n"
+        "• /top global — the goat across every chat\n"
         "• /me — your 67 count\n"
         "• /notify — change how you get notified\n"
         "• /reset — leaderboard reset (admin only)\n"
@@ -147,17 +146,6 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log any error PTB catches so it lands in the container logs with a
     traceback, instead of being silently swallowed."""
     log.error("unhandled error while processing an update", exc_info=context.error)
-
-
-async def cmd_topglobal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    storage: Storage = context.bot_data["storage"]
-    rows = storage.global_leaderboard(limit=None)
-    header = "🌍 global 67 leaderboard (all chats)"
-    text = "\n".join(
-        [_format_leaderboard_line(rows, i) for i in range(len(rows))]
-    )
-    text = header + "\n\n" + text if rows else header + "\n\nno 67s across chats yet 🫡"
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 def _format_leaderboard_line(rows, i: int) -> str:
@@ -181,12 +169,23 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     if chat is None:
         return
-    # "/top full" shows the whole leaderboard instead of the default top 10.
-    full = bool(context.args) and context.args[0].lower() == "full"
-    rows = storage.leaderboard(chat.id, limit=None if full else 10)
-    await update.effective_message.reply_text(
-        _format_leaderboard(rows), parse_mode=ParseMode.HTML
-    )
+    # Arg routing: "global" = cross-chat top 10, "full" = whole local board,
+        # nothing = local top 10.
+        arg = context.args[0].lower() if context.args else ""
+        if arg == "global":
+            rows = storage.global_leaderboard(limit=10)
+            text = "\n".join(
+                [_format_leaderboard_line(rows, i) for i in range(len(rows))]
+            )
+            text = "🌍 global 67 leaderboard (all chats)\n\n" + text if rows else (
+                "🌍 global 67 leaderboard (all chats)\n\nno 67s across chats yet 🫡"
+            )
+            await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+            return
+        rows = storage.leaderboard(chat.id, limit=None if arg == "full" else 10)
+        await update.effective_message.reply_text(
+            _format_leaderboard(rows), parse_mode=ParseMode.HTML
+        )
 
 
 async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
