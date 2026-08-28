@@ -25,7 +25,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import media
+from . import flow, media
 from .config import Config
 from .detector import Detector
 from .storage import Storage
@@ -70,6 +70,7 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("top", cmd_top))
+    app.add_handler(CommandHandler("flow", cmd_flow))
     app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("notify", cmd_notify))
     app.add_handler(CommandHandler("reset", cmd_reset))
@@ -105,6 +106,8 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
     )
     app.add_handler(MessageHandler(media_filter, on_media))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)\bs+\s*c+\s*u+\s*b+\s*a+"), cmd_scuba))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)\ba+\s*u+\s*r+\s*a+\b"), cmd_aura))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)\bm+o+g+(g+e+r+|g+e+d+)?\b"), cmd_mog))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)\bs+\s*o+\s*n+\b"), cmd_son))
     app.add_error_handler(on_error)
 
@@ -135,6 +138,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /top — who's the 67 goat in this chat\n"
         "• /top full — the whole leaderboard here\n"
         "• /top global — the goat across every chat\n"
+        "• /flow [day | week | all] — animated race of who's been racking up 67s\n"
         "• /me — your 67 count\n"
         "• /notify — change how you get notified\n"
         "• /reset — leaderboard reset (admin only)\n"
@@ -579,6 +583,103 @@ async def cmd_scuba(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("failed to send scuba reaction: %s", exc)
 
 
+_AURA_PATH = "/data/aura.mp4"
+
+
+async def cmd_aura(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the *FEELS THE AURA* reaction when someone says 'aura'."""
+    if not os.path.exists(_AURA_PATH):
+        return
+    try:
+        with open(_AURA_PATH, "rb") as f:
+            await update.effective_message.reply_animation(f)
+    except Exception as exc:
+        log.warning("failed to send aura reaction: %s", exc)
+
+
+_MOG_PATH = "/data/mog.mp4"
+
+
+async def cmd_mog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the gigachad zoom when someone says mog/mogged/mogger."""
+    if not os.path.exists(_MOG_PATH):
+        return
+    try:
+        with open(_MOG_PATH, "rb") as f:
+            await update.effective_message.reply_animation(f)
+    except Exception as exc:
+        log.warning("failed to send mog reaction: %s", exc)
+
+
+_SIXSEVEN_GIF_PATH = "/data/sixseven67.gif"
+_SIXSEVEN_MILESTONE = 67
+
+
+async def _send_sixseven_milestone(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                   user, new_count: int) -> None:
+    """When someone crosses 67 67s, fire the celebration gif + congrats."""
+    if new_count != _SIXSEVEN_MILESTONE:
+        return
+    if not os.path.exists(_SIXSEVEN_GIF_PATH):
+        log.warning("sixseven milestone gif missing at %s", _SIXSEVEN_GIF_PATH)
+        return
+    name = user.mention_html()
+    congrats = f"{name} has reached {_SIXSEVEN_MILESTONE} 67s! 🎉"
+    try:
+        with open(_SIXSEVEN_GIF_PATH, "rb") as f:
+            await update.effective_message.reply_animation(f)
+        await update.effective_message.reply_text(congrats, parse_mode=ParseMode.HTML)
+    except Exception as exc:
+        log.warning("failed to send 67 milestone gif: %s", exc)
+
+
+async def cmd_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/flow [day|week|all] — animated bar-chart race of 67s per person in this chat."""
+    chat = update.effective_chat
+    msg = update.effective_message
+    if chat is None or msg is None:
+        return
+    arg = (msg.text or "").split(maxsplit=1)[1].strip().lower() if " " in (msg.text or "") else ""
+    since_days: int | None = None
+    if arg in ("day", "today"):
+        since_days = 1
+        label = "last 24h"
+    elif arg in ("week",):
+        since_days = 7
+        label = "last 7 days"
+    elif arg in ("all", "", "month"):
+        since_days = None if arg != "month" else 30
+        label = "all time" if arg != "month" else "last 30 days"
+    else:
+        await msg.reply_text("usage: /flow [day | week | all]")
+        return
+    storage: Storage = context.bot_data["storage"]
+    if not storage.has_points_log(chat.id):
+        await msg.reply_text("no 67s logged in this chat yet")
+        return
+    wait = await msg.reply_text(f"rendering the race 🏁 ({label})")
+    try:
+        path = await asyncio.to_thread(
+            flow.render_race, storage.db_path, chat.id, since_days
+        )
+        if path is None:
+            await wait.edit_text("not enough 67s yet to race (need ≥2)")
+            return
+        with open(path, "rb") as f:
+            await msg.reply_animation(f)
+        await wait.delete()
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    except Exception as exc:
+        log.warning("failed to render flow for %s: %s", chat.id, exc)
+        try:
+            await wait.edit_text("couldn't render the race 😵‍💫 try again later")
+        except Exception:
+            pass
+
+
 # Token match for the son sticker with a trailing word boundary. The boundary
 # filters out "s-on" prefixes of other words (song, sonic, sons, sonny, sonar);
 # "soon" is shape-identical to an emphatic SOOOOON so it's excluded explicitly.
@@ -686,6 +787,10 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             user.username or "",
             media_message_id=msg.message_id,
         )
+
+        # Milestone: singleton celebration when someone crosses 67 67s. Fires
+        # unconditionally, before the notify-mode gating below.
+        await _send_sixseven_milestone(update, context, user, new_count)
 
         # Check notify mode
         mode = storage.get_notify_mode(update.effective_chat.id)
