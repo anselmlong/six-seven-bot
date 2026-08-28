@@ -12,6 +12,7 @@ are downscaled first to keep memory bounded.
 from __future__ import annotations
 
 import logging
+import os
 
 import numpy as np
 from PIL import Image
@@ -44,13 +45,16 @@ class OcrEngine:
         try:
             import easyocr
 
-            # Bound torch's intra-op threads: on a small VPS the default
-            # (one thread per CPU) spikes memory/CPU during inference, which is
-            # a prime suspect for silent OOM kills of the container.
+            # Bound torch's intra-op threads: unbounded (one per CPU) spiked
+            # memory/CPU during inference. 1 was overly cautious — it made each
+            # OCR pass take 10-36s and burst images queue for a minute+. 2
+            # halves latency; peak RSS stays well under the 3g cap.
             try:
                 import torch
 
-                torch.set_num_threads(1)
+                torch.set_num_threads(
+                    int(os.getenv("SIXSEVEN_TORCH_THREADS", "2"))
+                )
             except Exception:
                 pass
 

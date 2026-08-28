@@ -5,9 +5,12 @@ services:
     env_file: .env
     # Safety valve: cap container memory so a runaway OCR allocation is killed
     # at the container boundary (clean exit 137, visible in `docker inspect`)
-    # instead of silently OOM-killing something on the host. Raise if the VPS
-    # has room; EasyOCR + torch resident is ~0.5–1 GB, so 2g leaves headroom.
-    mem_limit: 2g
+    # instead of silently OOM-killing something on the host. Raised 2g→3g on
+    # 2026-08-23: torch/glibc never fully return freed inference memory, so
+    # RSS ratchets upward over days of media processing; at 2g the kernel was
+    # killing the bot every few days (blind windows = missed detections).
+    # EasyOCR+torch baseline is ~0.7 GB; host has 7.6 GB total.
+    mem_limit: 3g
     environment:
       # Keep the DB on the mounted volume.
       SIXSEVEN_DB_PATH: /data/sixseven.db
