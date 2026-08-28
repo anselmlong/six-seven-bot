@@ -21,6 +21,7 @@ _DEDUP_TTL = 7 * 24 * 3600  # 7 days in seconds
 
 class Storage:
     def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -421,6 +422,15 @@ class Storage:
             elif schedule == "monthly" and age >= 2592000:
                 due.append(chat_id)
         return due
+
+    def has_points_log(self, chat_id: int) -> bool:
+        """True if this chat has at least one logged 67 event."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM points_log WHERE chat_id = ? LIMIT 1",
+                (chat_id,),
+            ).fetchone()
+        return row is not None
 
     def leaderboard(self, chat_id: int, limit: int | None = 10) -> list[LeaderRow]:
         with self._lock:
