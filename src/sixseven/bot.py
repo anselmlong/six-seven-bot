@@ -126,8 +126,8 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
         name="auto-reset-check",
     )
 
-    # Weekly champion celebration, 00:00 SGT on Monday = 16:00 UTC Sunday.
-    # weekday 0 = Monday (python's datetime.weekday() convention).
+    # Weekly champion celebration, 00:00 SGT on Monday (16:00 UTC Sunday).
+    # Crowns the previous 7-day window (matches /flow week) — window rolls live.
     app.job_queue.run_daily(
         weekly_celebration,
         time=_dt_time(hour=16, minute=0, tzinfo=timezone.utc),
@@ -144,11 +144,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "video, and gif for 67. every time someone drops it, "
         "their counter goes up.\n\n"
         "commands:\n"
-        "• /top — this chat's leaderboard (this week in weekly mode)\n"
+        "• /top — this chat's leaderboard (last 7 days in weekly mode)\n"
         "• /top full — the whole leaderboard here\n"
-        "• /top week — this week's board\n"
+        "• /top week — the last 7 days here\n"
         "• /top global — the goat across every chat\n"
-        "• /top global week — global goat this week\n"
+        "• /top global week — global goat, last 7 days\n"
         "• /flow [day | week | all] — animated race of who's been racking up 67s\n"
         "• /me — your 67 count\n"
         "• /notify — change how you get notified\n"
@@ -210,13 +210,13 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         s, e = week_bounds()
         rows = storage.global_weekly_leaderboard(s, e, limit=10)
         text = "\n".join(_format_leaderboard_line(rows, i) for i in range(len(rows)))
-        text = "🌍 global 67 leaderboard (this week)\n\n" + text if rows else (
-            "🌍 global 67 leaderboard (this week)\n\nno 67s this week yet 🫡"
+        text = "🌍 global 67 leaderboard (last 7 days)\n\n" + text if rows else (
+            "🌍 global 67 leaderboard (last 7 days)\n\nno 67s in the last 7 days yet 🫡"
         )
     elif arg == "week":
         s, e = week_bounds()
         rows = storage.weekly_leaderboard(chat.id, s, e, limit=10)
-        text = _format_board(rows, "📅 this week's 67 leaderboard")
+        text = _format_board(rows, "📅 67 leaderboard (last 7 days)")
     else:
         full = arg == "full"
         if weekly_default:
@@ -224,7 +224,7 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             rows = storage.weekly_leaderboard(
                 chat.id, s, e, limit=None if full else 10
             )
-            text = _format_board(rows, "📅 this week's 67 leaderboard")
+            text = _format_board(rows, "📅 67 leaderboard (last 7 days)")
         else:
             rows = storage.leaderboard(chat.id, limit=None if full else 10)
             text = _format_leaderboard(rows)

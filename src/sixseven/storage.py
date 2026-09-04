@@ -6,10 +6,6 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
-
-# SGT = UTC+8, fixed offset (Singapore does not observe DST).
-_SGT = _timezone(_timedelta(hours=8))
 
 
 @dataclass
@@ -21,25 +17,19 @@ class LeaderRow:
 
 
 _DEDUP_TTL = 7 * 24 * 3600  # 7 days in seconds
+_WEEK = 7 * 24 * 3600
 
 
 def week_bounds(offset_weeks: int = 0) -> tuple[float, float]:
-    """Epoch (start, end) of an SGT week in Monday 00:00..next Monday 00:00.
+    """Epoch (start, end) of a rolling 7-day window (matches /flow week).
 
-    offset_weeks=0 -> the current week (start of this Monday .. now).
-    offset_weeks=1 -> the previously completed week (last Monday .. this Monday).
+    offset_weeks=0 -> the current window: now-7d .. now.
+    offset_weeks=1 -> the previous 7-day block: now-14d .. now-7d.
     """
-    now = _datetime.now(_SGT)
-    this_monday = (now - _timedelta(days=now.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    start_mon = this_monday - _timedelta(weeks=offset_weeks)
-    start_ts = start_mon.timestamp()
-    if offset_weeks == 0:
-        end_ts = now.timestamp()
-    else:
-        end_ts = (start_mon + _timedelta(weeks=1)).timestamp()
-    return start_ts, end_ts
+    now = time.time()
+    end = now - offset_weeks * _WEEK
+    start = end - _WEEK
+    return start, end
 
 
 class Storage:
