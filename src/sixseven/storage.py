@@ -6,6 +6,10 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone
+
+# SGT = UTC+8, fixed offset (Singapore does not observe DST).
+_SGT = _timezone(_timedelta(hours=8))
 
 
 @dataclass
@@ -17,6 +21,25 @@ class LeaderRow:
 
 
 _DEDUP_TTL = 7 * 24 * 3600  # 7 days in seconds
+
+
+def week_bounds(offset_weeks: int = 0) -> tuple[float, float]:
+    """Epoch (start, end) of an SGT week in Monday 00:00..next Monday 00:00.
+
+    offset_weeks=0 -> the current week (start of this Monday .. now).
+    offset_weeks=1 -> the previously completed week (last Monday .. this Monday).
+    """
+    now = _datetime.now(_SGT)
+    this_monday = (now - _timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    start_mon = this_monday - _timedelta(weeks=offset_weeks)
+    start_ts = start_mon.timestamp()
+    if offset_weeks == 0:
+        end_ts = now.timestamp()
+    else:
+        end_ts = (start_mon + _timedelta(weeks=1)).timestamp()
+    return start_ts, end_ts
 
 
 class Storage:
@@ -488,6 +511,73 @@ class Storage:
                 (chat_id, user_id),
             ).fetchone()
         return int(row[0]) if row else 0
+
+    # ---------- weekly leaderboards ----------
+    # The weekly board is derived from points_log (one row per 67 event) instead
+    # of the running `counts` total, so the all-time/global board can accumulate
+    # forever while the week window simply rolls over — no reset required.
+
+    @staticmethod
+    def _weekly_sql(chat_scoped: bool) -> str:
+        cond = "r.chat_id = ? AND " if chat_scoped else ""
+        return f"""
+            WITH ranked AS (
+                SELECT user_id, display_name, username, created_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY user_id ORDER BY created_at DESC
+                       ) AS rn
+                FROM points_log r
+                WHERE {cond}created_at >= ? AND created_at < ?
+            ),
+            agg AS (
+                SELECT user_id, COUNT(*) AS cnt, MAX(created_at) AS last_hit
+                FROM points_log r
+                WHERE {cond}created_at >= ? AND created_at < ?
+                GROUP BY user_id
+            )
+            SELECT r.user_id, r.display_name, r.username, a.cnt AS count, a.last_hit
+            FROM ranked r JOIN agg a ON a.user_id = r.user_id
+            WHERE r.rn = 1
+            ORDER BY a.cnt DESC, a.last_hit ASC
+        """
+
+    def weekly_leaderboard(
+        self,
+        chat_id: int,
+        start: float,
+        end: float,
+        limit: int | None = 10,
+    ) -> list[LeaderRow]:
+        with self._lock:
+            sql = self._weekly_sql(chat_scoped=True)
+            params: list = [chat_id, start, end, chat_id, start, end]
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = self._conn.execute(sql, params).fetchall()
+        return [LeaderRow(r[0], r[1], r[2], int(r[3])) for r in rows]
+
+    def global_weekly_leaderboard(
+        self, start: float, end: float, limit: int | None = 10
+    ) -> list[LeaderRow]:
+        with self._lock:
+            sql = self._weekly_sql(chat_scoped=False)
+            params: list = [start, end, start, end]
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = self._conn.execute(sql, params).fetchall()
+        return [LeaderRow(r[0], r[1], r[2], int(r[3])) for r in rows]
+
+    def chats_active_in_week(self, start: float, end: float) -> list[int]:
+        """Chat ids that logged at least one 67 event inside the window."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT chat_id FROM points_log "
+                "WHERE created_at >= ? AND created_at < ?",
+                (start, end),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
 
     def close(self) -> None:
         with self._lock:

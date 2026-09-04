@@ -28,7 +28,7 @@ from telegram.ext import (
 from . import flow, media
 from .config import Config
 from .detector import Detector
-from .storage import Storage
+from .storage import Storage, week_bounds
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +126,15 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
         name="auto-reset-check",
     )
 
+    # Weekly champion celebration, 00:00 SGT on Monday = 16:00 UTC Sunday.
+    # weekday 0 = Monday (python's datetime.weekday() convention).
+    app.job_queue.run_daily(
+        weekly_celebration,
+        time=_dt_time(hour=16, minute=0, tzinfo=timezone.utc),
+        days=(0,),
+        name="weekly-celebration",
+    )
+
     return app
 
 
@@ -135,13 +144,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "video, and gif for 67. every time someone drops it, "
         "their counter goes up.\n\n"
         "commands:\n"
-        "• /top — who's the 67 goat in this chat\n"
+        "• /top — this chat's leaderboard (this week in weekly mode)\n"
         "• /top full — the whole leaderboard here\n"
+        "• /top week — this week's board\n"
         "• /top global — the goat across every chat\n"
+        "• /top global week — global goat this week\n"
         "• /flow [day | week | all] — animated race of who's been racking up 67s\n"
         "• /me — your 67 count\n"
         "• /notify — change how you get notified\n"
-        "• /reset — leaderboard reset (admin only)\n"
+        "• /reset — leaderboard reset / weekly mode (admin only)\n"
         "• /start — this"
     )
 
@@ -168,28 +179,56 @@ def _format_leaderboard(rows) -> str:
     return "\n".join(lines)
 
 
+def _format_board(rows, title: str) -> str:
+    if not rows:
+        return f"{title}\n\nno 67s yet. skill issue 🫡"
+    lines = [title, ""]
+    for i, _row in enumerate(rows):
+        lines.append(_format_leaderboard_line(rows, i))
+    return "\n".join(lines)
+
+
 async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     storage: Storage = context.bot_data["storage"]
     chat = update.effective_chat
     if chat is None:
         return
-    # Arg routing: "global" = cross-chat top 10, "full" = whole local board,
-    # nothing = local top 10.
-    arg = context.args[0].lower() if context.args else ""
+    # Routing: "global" = all-time across every chat; "global week" / "week
+    # global" = this week across every chat; "week" = this week in this chat;
+    # "full" = the whole of the default board; nothing = the default board.
+    arg = " ".join(a.lower() for a in (context.args or []))
+    # Chats in weekly mode show the rolling week by default instead of all-time.
+    weekly_default = storage.get_reset_schedule(chat.id) == "weekly"
+
     if arg == "global":
         rows = storage.global_leaderboard(limit=10)
-        text = "\n".join(
-            [_format_leaderboard_line(rows, i) for i in range(len(rows))]
-        )
+        text = "\n".join(_format_leaderboard_line(rows, i) for i in range(len(rows)))
         text = "🌍 global 67 leaderboard (all chats)\n\n" + text if rows else (
             "🌍 global 67 leaderboard (all chats)\n\nno 67s across chats yet 🫡"
         )
-        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
-        return
-    rows = storage.leaderboard(chat.id, limit=None if arg == "full" else 10)
-    await update.effective_message.reply_text(
-        _format_leaderboard(rows), parse_mode=ParseMode.HTML
-    )
+    elif arg in ("global week", "week global"):
+        s, e = week_bounds()
+        rows = storage.global_weekly_leaderboard(s, e, limit=10)
+        text = "\n".join(_format_leaderboard_line(rows, i) for i in range(len(rows)))
+        text = "🌍 global 67 leaderboard (this week)\n\n" + text if rows else (
+            "🌍 global 67 leaderboard (this week)\n\nno 67s this week yet 🫡"
+        )
+    elif arg == "week":
+        s, e = week_bounds()
+        rows = storage.weekly_leaderboard(chat.id, s, e, limit=10)
+        text = _format_board(rows, "📅 this week's 67 leaderboard")
+    else:
+        full = arg == "full"
+        if weekly_default:
+            s, e = week_bounds()
+            rows = storage.weekly_leaderboard(
+                chat.id, s, e, limit=None if full else 10
+            )
+            text = _format_board(rows, "📅 this week's 67 leaderboard")
+        else:
+            rows = storage.leaderboard(chat.id, limit=None if full else 10)
+            text = _format_leaderboard(rows)
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -443,11 +482,10 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(
             f"current reset schedule: {schedule}\n\n"
             "options:\n"
-            "• /reset now — wipe the leaderboard (requires confirmation)\n"
-            "• /reset daily — auto-reset every day\n"
-            "• /reset weekly — auto-reset every Monday\n"
-            "• /reset monthly — auto-reset every 1st of the month\n"
-            "• /reset off — disable auto-reset"
+            "• /reset now — wipe ALL counts in this chat (requires confirmation)\n"
+            "• /reset weekly — weekly mode: /top shows this week, counts keep building\n"
+            "• /reset off — back to the all-time /top\n"
+            "• /reset daily / monthly — auto-wipe on schedule"
         )
         return
 
@@ -481,9 +519,9 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if cmd in _RESET_SCHEDULES:
         storage.set_reset_schedule(chat.id, cmd)
         labels = {
-            "off": "auto-reset disabled",
+            "off": "all-time /top restored",
             "daily": "resets daily at midnight",
-            "weekly": "resets weekly on Monday",
+            "weekly": "weekly mode on — /top shows this week, counts keep building",
             "monthly": "resets monthly on the 1st",
         }
         await update.effective_message.reply_text(f"reset schedule set to: {labels[cmd]}")
@@ -612,19 +650,18 @@ async def cmd_mog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 _SIXSEVEN_GIF_PATH = "/data/sixseven67.gif"
-_SIXSEVEN_MILESTONE = 67
 
 
 async def _send_sixseven_milestone(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                    user, new_count: int) -> None:
-    """When someone crosses 67 67s, fire the celebration gif + congrats."""
-    if new_count != _SIXSEVEN_MILESTONE:
+    """When someone hits 67 67s (and each 167, 267, ... after), fire the gif + congrats."""
+    if new_count % 100 != 67:
         return
     if not os.path.exists(_SIXSEVEN_GIF_PATH):
         log.warning("sixseven milestone gif missing at %s", _SIXSEVEN_GIF_PATH)
         return
     name = user.mention_html()
-    congrats = f"{name} has reached {_SIXSEVEN_MILESTONE} 67s! 🎉"
+    congrats = f"{name} has reached {new_count} 67s! 🎉"
     try:
         with open(_SIXSEVEN_GIF_PATH, "rb") as f:
             await update.effective_message.reply_animation(f)
@@ -788,8 +825,8 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             media_message_id=msg.message_id,
         )
 
-        # Milestone: singleton celebration when someone crosses 67 67s. Fires
-        # unconditionally, before the notify-mode gating below.
+        # Milestone: singleton celebration when someone hits 67 67s (and each
+        # 167, 267, ... after). Fires unconditionally, before notify-mode gating.
         await _send_sixseven_milestone(update, context, user, new_count)
 
         # Check notify mode
@@ -816,10 +853,16 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def auto_reset_check(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Periodic check: reset leaderboards for chats whose schedule is due."""
+    """Periodic check: reset leaderboards for chats whose schedule is due.
+
+    Only 'daily' and 'monthly' schedules hard-wipe the running total. 'weekly'
+    no longer wipes — it's a weekly-mode flag handled by the Monday celebration.
+    """
     storage: Storage = context.bot_data["storage"]
     now = _time.time()
     for chat_id in storage.get_chats_due_for_reset(now):
+        if storage.get_reset_schedule(chat_id) == "weekly":
+            continue  # weekly mode rolls over via points_log; no wipe
         # Capture the full final standings before wiping so the chat sees who won.
         rows = storage.leaderboard(chat_id, limit=None)
         storage.reset_leaderboard(chat_id)
@@ -832,6 +875,26 @@ async def auto_reset_check(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except Exception as exc:
             log.warning("failed to notify chat %d of reset: %s", chat_id, exc)
+
+
+async def weekly_celebration(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Monday 00:00 SGT: crown each chat's (and the global) six sevener of the week."""
+    storage: Storage = context.bot_data["storage"]
+    start, end = week_bounds(offset_weeks=1)  # the just-completed week
+    g_rows = storage.global_weekly_leaderboard(start, end, limit=1)
+    g_champ = g_rows[0] if g_rows else None
+    for chat_id in storage.chats_active_in_week(start, end):
+        rows = storage.weekly_leaderboard(chat_id, start, end, limit=None)
+        if not rows:
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=_format_celebration_message(rows, g_champ),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            log.warning("failed to celebrate weekly champ in chat %d: %s", chat_id, exc)
 
 
 async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -871,4 +934,35 @@ def _format_daily_summary(rows) -> str:
         medal = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
         name = html.escape(row.display_name or (f"@{row.username}" if row.username else "Someone"))
         lines.append(f"{medal} {name} — {row.count} 67s")
+    return "\n".join(lines)
+
+
+def _display_name(row) -> str:
+    return html.escape(
+        row.display_name or (f"@{row.username}" if row.username else "Someone")
+    )
+
+
+def _format_celebration_message(rows, g_champ=None) -> str:
+    """Monday morning: crown the week's top six sevener, per chat + global."""
+    top = rows[0]
+    win_word = "67" if top.count == 1 else "67s"
+    lines = [
+        "🏆 SIX SEVENER OF THE WEEK 🏆",
+        "",
+        f"the top 67er of the week is {_display_name(top)} with {top.count} {win_word} 👑! well played!!",
+        "",
+        "final standings:",
+    ]
+    for i, row in enumerate(rows):
+        medal = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
+        lines.append(f"{medal} {_display_name(row)} — {row.count} 67s")
+    if g_champ is not None:
+        lines.append("")
+        lines.append(
+            f"🌍 and the global champ across every chat is {_display_name(g_champ)} "
+            f"with {g_champ.count} 67s this week"
+        )
+    lines.append("")
+    lines.append("fresh week starts now. go defend the crown 🗓️")
     return "\n".join(lines)

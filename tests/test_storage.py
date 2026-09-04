@@ -4,7 +4,21 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from sixseven.storage import Storage
+from sixseven.storage import Storage, week_bounds
+
+
+def _insert_points(store, chat_id, user_id, name, uname, ts, n=1):
+    """Backfill points_log rows with a controlled created_at (for window tests)."""
+    with store._lock:
+        for _ in range(n):
+            store._conn.execute(
+                "INSERT INTO points_log "
+                "(chat_id, media_message_id, award_message_id, user_id, "
+                " display_name, username, created_at) "
+                "VALUES (?, 0, 0, ?, ?, ?, ?)",
+                (chat_id, user_id, name, uname, ts),
+            )
+        store._conn.commit()
 
 
 def test_increment_and_leaderboard(tmp_path):
@@ -141,3 +155,78 @@ def test_global_leaderboard_empty(tmp_path):
     db = str(tmp_path / "t.db")
     store = Storage(db)
     assert store.global_leaderboard(limit=None) == []
+
+
+def test_weekly_leaderboard_counts_only_current_week(tmp_path):
+    db = str(tmp_path / "t.db")
+    store = Storage(db)
+    now = time.time()
+    day = 86400
+    old = now - 8 * day  # within the previous, completed week
+    # This week: Alice x2, Bob x1 (via increment, created_at=now).
+    store.increment(1, 100, "Alice", "alice")
+    store.increment(1, 100, "Alice", "alice")
+    store.increment(1, 200, "Bob", "bob")
+    # Last week: must be excluded from the weekly window.
+    _insert_points(store, 1, 100, "Alice", "alice", old, n=3)
+    _insert_points(store, 1, 200, "Bob", "bob", old, n=2)
+    s, e = week_bounds()
+    board = store.weekly_leaderboard(1, s, e, limit=None)
+    by_id = {r.user_id: r for r in board}
+    # Weekly board counts only in-window events, not the all-time totals.
+    assert by_id[100].count == 2
+    assert by_id[200].count == 1
+    assert len(board) == 2
+    # Total points_log rows = 8 (Alice 2 + Bob 1 current, +3 +2 backdated) —
+    # the weekly window filters those down to the 2/1 shown above.
+    with store._lock:
+        n = store._conn.execute("SELECT COUNT(*) FROM points_log").fetchone()[0]
+    assert n == 8
+    store.close()
+
+
+def test_weekly_leaderboard_name_from_latest_event(tmp_path):
+    db = str(tmp_path / "t.db")
+    store = Storage(db)
+    s, e = week_bounds()
+    # Two in-window events; the later one's display name wins.
+    _insert_points(store, 1, 100, "OldName", "old", s + (e - s) * 0.4)
+    _insert_points(store, 1, 100, "NewName", "new", s + (e - s) * 0.6)
+    row = store.weekly_leaderboard(1, s, e, limit=None)[0]
+    assert row.display_name == "NewName"
+    store.close()
+
+
+def test_global_weekly_leaderboard_sums_across_chats(tmp_path):
+    db = str(tmp_path / "t.db")
+    store = Storage(db)
+    now = time.time()
+    day = 86400
+    old = now - 8 * day
+    # This week: Alice 1 in chat1 + 2 in chat2. Bob 5 in chat1.
+    store.increment(1, 100, "Alice", "alice")
+    store.increment(2, 100, "Alice", "alice")
+    store.increment(2, 100, "Alice", "alice")
+    for _ in range(5):
+        store.increment(1, 200, "Bob", "bob")
+    # Old activity excluded.
+    _insert_points(store, 1, 100, "Alice", "alice", old, n=10)
+    s, e = week_bounds()
+    rows = store.global_weekly_leaderboard(s, e, limit=None)
+    by_id = {r.user_id: r for r in rows}
+    assert by_id[100].count == 3  # 1 + 2, excludes the 10 backdated
+    assert by_id[200].count == 5
+    assert rows[0].user_id == 200  # Bob 5 > Alice 3
+    store.close()
+
+
+def test_chats_active_in_week_excludes_inactive(tmp_path):
+    db = str(tmp_path / "t.db")
+    store = Storage(db)
+    now = time.time()
+    day = 86400
+    store.increment(1, 100, "Alice", "alice")  # chat1 active this week
+    _insert_points(store, 2, 100, "Alice", "alice", now - 8 * day)  # chat2 only old
+    s, e = week_bounds()
+    assert store.chats_active_in_week(s, e) == [1]
+    store.close()
