@@ -1,6 +1,6 @@
 # six-seven-bot 🔢
 
-[![six-seven-bot launch video](docs/launch.jpg)](docs/launch.mp4?raw=true)
+[![six-seven-bot launch video](docs/launch.jpg)](https://anselmlong.com/videos/launch/sixseven.mp4)
 
 <sub>▶ 20-second launch video (click to play)</sub>
 
