@@ -880,7 +880,7 @@ async def auto_reset_check(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def weekly_celebration(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Monday 00:00 SGT: crown each chat's (and the global) six sevener of the week."""
     storage: Storage = context.bot_data["storage"]
-    start, end = week_bounds(offset_weeks=1)  # the just-completed week
+    start, end = week_bounds(offset_weeks=0)  # this Mon-00:00 boundary -> the just-finished week, matches /top week
     g_rows = storage.global_weekly_leaderboard(start, end, limit=1)
     g_champ = g_rows[0] if g_rows else None
     for chat_id in storage.chats_active_in_week(start, end):
