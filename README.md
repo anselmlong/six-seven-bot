@@ -1,6 +1,6 @@
 # six-seven-bot 🔢
 
-[![six-seven-bot launch video](docs/launch.jpg)](docs/launch.mp4)
+[![six-seven-bot launch video](docs/launch.jpg)](docs/launch.mp4?raw=true)
 
 <sub>▶ 20-second launch video (click to play)</sub>
 
