@@ -16,10 +16,28 @@ class LeaderRow:
     count: int
 
 
+_DEDUP_TTL = 7 * 24 * 3600  # 7 days in seconds
+_WEEK = 7 * 24 * 3600
+
+
+def week_bounds(offset_weeks: int = 0) -> tuple[float, float]:
+    """Epoch (start, end) of a rolling 7-day window (matches /flow week).
+
+    offset_weeks=0 -> the current window: now-7d .. now.
+    offset_weeks=1 -> the previous 7-day block: now-14d .. now-7d.
+    """
+    now = time.time()
+    end = now - offset_weeks * _WEEK
+    start = end - _WEEK
+    return start, end
+
+
 class Storage:
     def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS counts (
@@ -41,7 +59,95 @@ class Storage:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processed_messages (
+                chat_id      INTEGER NOT NULL,
+                message_id   INTEGER NOT NULL,
+                processed_at REAL    NOT NULL,
+                PRIMARY KEY (chat_id, message_id)
+            )
+            """
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_processed_messages_cleanup "
+            "ON processed_messages (processed_at)"
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS points_log (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id          INTEGER NOT NULL,
+                media_message_id INTEGER NOT NULL,
+                award_message_id INTEGER NOT NULL DEFAULT 0,
+                user_id          INTEGER NOT NULL,
+                display_name     TEXT    NOT NULL DEFAULT '',
+                username         TEXT    NOT NULL DEFAULT '',
+                created_at       REAL    NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS disputes (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                points_log_id  INTEGER NOT NULL,
+                chat_id        INTEGER NOT NULL,
+                target_user_id INTEGER NOT NULL,
+                opened_by      INTEGER NOT NULL,
+                threshold      INTEGER NOT NULL,
+                status         TEXT    NOT NULL DEFAULT 'open',
+                created_at     REAL    NOT NULL,
+                expires_at     REAL    NOT NULL,
+                resolved_at    REAL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dispute_votes (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispute_id    INTEGER NOT NULL,
+                voter_user_id INTEGER NOT NULL,
+                display_name  TEXT    NOT NULL DEFAULT '',
+                username      TEXT    NOT NULL DEFAULT '',
+                voted_at      REAL    NOT NULL,
+                UNIQUE (dispute_id, voter_user_id)
+            )
+            """
+        )
+        # Migrate existing dispute_votes tables to add voter names
+        for col in (
+            "display_name TEXT NOT NULL DEFAULT ''",
+            "username TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                self._conn.execute(f"ALTER TABLE dispute_votes ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_points_log_award "
+            "ON points_log (chat_id, award_message_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_disputes_open "
+            "ON disputes (points_log_id, status)"
+        )
+        # Migrate existing chat_config rows to add reset columns
+        try:
+            self._conn.execute(
+                "ALTER TABLE chat_config ADD COLUMN reset_schedule TEXT NOT NULL DEFAULT 'off'"
+            )
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self._conn.execute(
+                "ALTER TABLE chat_config ADD COLUMN last_reset_at REAL NOT NULL DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass
         self._conn.commit()
+        self._cleanup_processed_messages()
 
     def get_notify_mode(self, chat_id: int) -> str:
         with self._lock:
@@ -73,8 +179,14 @@ class Storage:
         user_id: int,
         display_name: str,
         username: str,
-    ) -> int:
-        """Add one to a member's counter and return their new total."""
+        media_message_id: int = 0,
+        award_message_id: int = 0,
+    ) -> tuple[int, int]:
+        """Add one to a member's counter and log the individual point.
+
+        Returns (new_total, points_log_id). The log id anchors disputes so a
+        specific point (not just a raw -1) can be overturned later.
+        """
         now = time.time()
         with self._lock:
             self._conn.execute(
@@ -89,6 +201,151 @@ class Storage:
                 """,
                 (chat_id, user_id, username, display_name, now),
             )
+            cur = self._conn.execute(
+                """
+                INSERT INTO points_log
+                    (chat_id, media_message_id, award_message_id, user_id,
+                     display_name, username, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (chat_id, media_message_id, award_message_id, user_id,
+                 display_name, username, now),
+            )
+            log_id = int(cur.lastrowid or 0)
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT count FROM counts WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            ).fetchone()
+        return int(row[0]) if row else 0, log_id
+
+    # ---------- points log ----------
+    def update_award_message(self, log_id: int, award_message_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE points_log SET award_message_id = ? WHERE id = ?",
+                (award_message_id, log_id),
+            )
+            self._conn.commit()
+
+    def points_log_by_id(self, log_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM points_log WHERE id = ?", (log_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def points_log_by_award(self, chat_id: int, award_message_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM points_log WHERE chat_id = ? AND award_message_id = ?",
+                (chat_id, award_message_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ---------- disputes ----------
+    def open_dispute(
+        self,
+        chat_id: int,
+        points_log_id: int,
+        target_user_id: int,
+        opened_by: int,
+        threshold: int,
+        expires_at: float,
+    ) -> dict:
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO disputes
+                    (points_log_id, chat_id, target_user_id, opened_by,
+                     threshold, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (points_log_id, chat_id, target_user_id, opened_by,
+                 threshold, now, expires_at),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM disputes WHERE id = ?", (cur.lastrowid,)
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def get_dispute(self, dispute_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM disputes WHERE id = ?", (dispute_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_open_dispute(self, chat_id: int, points_log_id: int) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM disputes WHERE chat_id = ? AND points_log_id = ? "
+                "AND status = 'open' ORDER BY id DESC LIMIT 1",
+                (chat_id, points_log_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def dispute_vote(
+        self,
+        dispute_id: int,
+        voter_user_id: int,
+        display_name: str = "",
+        username: str = "",
+    ) -> str:
+        """Register one vote. Returns 'already_voted', 'resolved', or 'voted'."""
+        with self._lock:
+            d = self._conn.execute(
+                "SELECT status FROM disputes WHERE id = ?", (dispute_id,)
+            ).fetchone()
+            if d is None:
+                return "resolved"
+            if d["status"] != "open":
+                return "resolved"
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO dispute_votes "
+                "(dispute_id, voter_user_id, display_name, username, voted_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (dispute_id, voter_user_id, display_name, username, time.time()),
+            )
+            self._conn.commit()
+        return "already_voted" if cur.rowcount == 0 else "voted"
+
+    def dispute_vote_count(self, dispute_id: int) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM dispute_votes WHERE dispute_id = ?",
+                (dispute_id,),
+            ).fetchone()
+        return int(row["n"])
+
+    def dispute_voters(self, dispute_id: int) -> list[dict]:
+        """Distinct voters with their display names, in vote order."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT voter_user_id, display_name, username "
+                "FROM dispute_votes WHERE dispute_id = ? ORDER BY voted_at ASC",
+                (dispute_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_dispute_resolved(self, dispute_id: int, status: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE disputes SET status = ?, resolved_at = ? WHERE id = ?",
+                (status, time.time(), dispute_id),
+            )
+            self._conn.commit()
+
+    def decrement(self, chat_id: int, user_id: int) -> int:
+        """Remove one point from a member (floor 0); returns the new total."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE counts SET count = MAX(count - 1, 0) "
+                "WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            )
             self._conn.commit()
             row = self._conn.execute(
                 "SELECT count FROM counts WHERE chat_id = ? AND user_id = ?",
@@ -96,18 +353,145 @@ class Storage:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    def leaderboard(self, chat_id: int, limit: int = 10) -> list[LeaderRow]:
+    def is_first_time(self, chat_id: int, message_id: int) -> bool:
+        """Atomically check-and-mark a message as processed.
+
+        Returns True the FIRST time a (chat_id, message_id) pair is seen.
+        Returns False for any subsequent call with the same pair — even after
+        a process restart — preventing double-counting from all causes
+        (Telegram re-delivery, concurrent processing, crash recovery, etc.).
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT OR IGNORE INTO processed_messages (chat_id, message_id, processed_at) "
+                "VALUES (?, ?, ?)",
+                (chat_id, message_id, time.time()),
+            )
+            self._conn.commit()
+            return cursor.rowcount == 1
+
+    def _cleanup_processed_messages(self) -> None:
+        """Remove entries older than the TTL to keep the table bounded."""
+        cutoff = time.time() - _DEDUP_TTL
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM processed_messages WHERE processed_at < ?", (cutoff,)
+            )
+            self._conn.commit()
+
+    def set_reset_schedule(self, chat_id: int, schedule: str) -> None:
+        """Set auto-reset schedule for a chat (off/daily/weekly/monthly)."""
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO chat_config (chat_id, reset_schedule, last_reset_at)
+                   VALUES (?, ?, 0)
+                   ON CONFLICT(chat_id) DO UPDATE SET
+                       reset_schedule = excluded.reset_schedule""",
+                (chat_id, schedule),
+            )
+            self._conn.commit()
+
+    def get_reset_schedule(self, chat_id: int) -> str:
+        """Return the current reset schedule for a chat."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT reset_schedule FROM chat_config WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+        return row[0] if row else "off"
+
+    def reset_leaderboard(self, chat_id: int) -> None:
+        """Wipe all counts for a chat and stamp the reset time."""
+        now = time.time()
+        with self._lock:
+            self._conn.execute("DELETE FROM counts WHERE chat_id = ?", (chat_id,))
+            self._conn.execute(
+                """INSERT INTO chat_config (chat_id, last_reset_at) VALUES (?, ?)
+                   ON CONFLICT(chat_id) DO UPDATE SET
+                       last_reset_at = excluded.last_reset_at""",
+                (chat_id, now),
+            )
+            self._conn.commit()
+
+    def get_chats_due_for_reset(self, now: float | None = None) -> list[int]:
+        """Return chat_ids whose auto-reset schedule is due.
+
+        Daily = 24h since last reset, weekly = 7 days, monthly = 30 days.
+        """
+        if now is None:
+            now = time.time()
         with self._lock:
             rows = self._conn.execute(
-                """
+                """SELECT chat_id, reset_schedule, COALESCE(last_reset_at, 0) as last_reset
+                   FROM chat_config
+                   WHERE reset_schedule != 'off'""",
+            ).fetchall()
+        due = []
+        for chat_id, schedule, last_reset in rows:
+            age = now - last_reset
+            if schedule == "daily" and age >= 86400:
+                due.append(chat_id)
+            elif schedule == "weekly" and age >= 604800:
+                due.append(chat_id)
+            elif schedule == "monthly" and age >= 2592000:
+                due.append(chat_id)
+        return due
+
+    def has_points_log(self, chat_id: int) -> bool:
+        """True if this chat has at least one logged 67 event."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM points_log WHERE chat_id = ? LIMIT 1",
+                (chat_id,),
+            ).fetchone()
+        return row is not None
+
+    def leaderboard(self, chat_id: int, limit: int | None = 10) -> list[LeaderRow]:
+        with self._lock:
+            sql = """
                 SELECT user_id, display_name, username, count
                 FROM counts
                 WHERE chat_id = ?
                 ORDER BY count DESC, last_hit_at ASC
-                LIMIT ?
-                """,
-                (chat_id, limit),
-            ).fetchall()
+            """
+            params: list = [chat_id]
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = self._conn.execute(sql, params).fetchall()
+        return [LeaderRow(r[0], r[1], r[2], int(r[3])) for r in rows]
+
+    def global_leaderboard(self, limit: int | None = 20) -> list[LeaderRow]:
+        """Standings across every chat, per user.
+
+        Sums each user's count across all chats; the displayed name/username is
+        taken from their highest-count occurrence (their most distinctive 67 run).
+        """
+        with self._lock:
+            sql = """
+                WITH ranked AS (
+                    SELECT user_id, display_name, username, count, last_hit_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY user_id
+                               ORDER BY count DESC, last_hit_at DESC
+                           ) AS rn
+                    FROM counts
+                ),
+                totals AS (
+                    SELECT user_id, SUM(count) AS total, MAX(last_hit_at) AS last_hit
+                    FROM counts
+                    GROUP BY user_id
+                )
+                SELECT r.user_id, r.display_name, r.username, t.total AS count, t.last_hit
+                FROM ranked r
+                JOIN totals t ON t.user_id = r.user_id
+                WHERE r.rn = 1
+                ORDER BY t.total DESC, t.last_hit ASC
+            """
+            params: list = []
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = self._conn.execute(sql, params).fetchall()
         return [LeaderRow(r[0], r[1], r[2], int(r[3])) for r in rows]
 
     def user_count(self, chat_id: int, user_id: int) -> int:
@@ -118,6 +502,83 @@ class Storage:
             ).fetchone()
         return int(row[0]) if row else 0
 
+    # ---------- weekly leaderboards ----------
+    # The weekly board is derived from points_log (one row per 67 event) instead
+    # of the running `counts` total, so the all-time/global board can accumulate
+    # forever while the week window simply rolls over — no reset required.
+
+    @staticmethod
+    def _weekly_sql(chat_scoped: bool) -> str:
+        cond = "r.chat_id = ? AND " if chat_scoped else ""
+        return f"""
+            WITH ranked AS (
+                SELECT user_id, display_name, username, created_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY user_id ORDER BY created_at DESC
+                       ) AS rn
+                FROM points_log r
+                WHERE {cond}created_at >= ? AND created_at < ?
+            ),
+            agg AS (
+                SELECT user_id, COUNT(*) AS cnt, MAX(created_at) AS last_hit
+                FROM points_log r
+                WHERE {cond}created_at >= ? AND created_at < ?
+                GROUP BY user_id
+            )
+            SELECT r.user_id, r.display_name, r.username, a.cnt AS count, a.last_hit
+            FROM ranked r JOIN agg a ON a.user_id = r.user_id
+            WHERE r.rn = 1
+            ORDER BY a.cnt DESC, a.last_hit ASC
+        """
+
+    def weekly_leaderboard(
+        self,
+        chat_id: int,
+        start: float,
+        end: float,
+        limit: int | None = 10,
+    ) -> list[LeaderRow]:
+        with self._lock:
+            sql = self._weekly_sql(chat_scoped=True)
+            params: list = [chat_id, start, end, chat_id, start, end]
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = self._conn.execute(sql, params).fetchall()
+        return [LeaderRow(r[0], r[1], r[2], int(r[3])) for r in rows]
+
+    def global_weekly_leaderboard(
+        self, start: float, end: float, limit: int | None = 10
+    ) -> list[LeaderRow]:
+        with self._lock:
+            sql = self._weekly_sql(chat_scoped=False)
+            params: list = [start, end, start, end]
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = self._conn.execute(sql, params).fetchall()
+        return [LeaderRow(r[0], r[1], r[2], int(r[3])) for r in rows]
+
+    def chats_active_in_week(self, start: float, end: float) -> list[int]:
+        """Chat ids that logged at least one 67 event inside the window."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT chat_id FROM points_log "
+                "WHERE created_at >= ? AND created_at < ?",
+                (start, end),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def get_all_chat_ids(self) -> list[int]:
+        """Return all unique chat_ids the bot has ever seen."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT chat_id FROM counts "
+                "UNION "
+                "SELECT DISTINCT chat_id FROM chat_config"
+            ).fetchall()
+        return [r[0] for r in rows]
