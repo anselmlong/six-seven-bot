@@ -1,5 +1,9 @@
 # six-seven-bot 🔢
 
+[![six-seven-bot launch video](docs/launch.jpg)](https://anselmlong.com/videos/launch/sixseven.mp4)
+
+<sub>▶ 20-second launch video (click to play)</sub>
+
 A gloriously silly Telegram bot. Add it to a group chat and it watches every
 photo, video, video note ("bubble"), and GIF for the numbers **6 and 7
 together** — as digits (`67`, `6 7`, `6-7`), or the words **"six seven"**. Every
