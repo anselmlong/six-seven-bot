@@ -32,6 +32,10 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # httpx logs every request URL at INFO, and Telegram URLs embed the bot
+    # token — silence it so the token never lands in the container logs (and
+    # the getUpdates poll every few seconds stops drowning out real events).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     log = logging.getLogger("sixseven")
 
     config = Config.from_env()
