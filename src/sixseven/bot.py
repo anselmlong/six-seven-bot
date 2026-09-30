@@ -266,6 +266,15 @@ async def _open_or_show_dispute(update: Update, context: ContextTypes.DEFAULT_TY
             await update.effective_message.reply_text("you can't dispute your own point 😅")
         return
 
+    # A point can only be taken away once — /dispute on an old award would
+    # otherwise open a fresh vote and decrement the same point again.
+    if storage.is_overturned(log["id"]):
+        if update.callback_query is not None:
+            await update.callback_query.answer("this 67 was already overturned")
+        else:
+            await update.effective_message.reply_text("this 67 was already overturned ⚖️")
+        return
+
     existing = storage.get_open_dispute(chat_id, log["id"])
     if existing and _time.time() < existing["expires_at"]:
         status = _format_vote_status(

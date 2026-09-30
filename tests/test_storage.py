@@ -230,3 +230,34 @@ def test_chats_active_in_week_excludes_inactive(tmp_path):
     s, e = week_bounds()
     assert store.chats_active_in_week(s, e) == [1]
     store.close()
+
+
+def _overturn(store, log_id):
+    d = store.open_dispute(1, log_id, 100, 200, 3, time.time() + 300)
+    store.set_dispute_resolved(d["id"], "overturned")
+
+
+def test_overturned_points_drop_off_weekly_boards(tmp_path):
+    store = Storage(str(tmp_path / "t.db"))
+    store.increment(1, 100, "Alice", "alice")
+    _, bad = store.increment(1, 100, "Alice", "alice")
+    store.increment(1, 200, "Bob", "bob")
+    assert not store.is_overturned(bad)
+    _overturn(store, bad)
+    assert store.is_overturned(bad)
+
+    s, e = week_bounds()
+    board = {r.display_name: r.count for r in store.weekly_leaderboard(1, s, e, limit=None)}
+    assert board == {"Alice": 1, "Bob": 1}
+    glob = {r.display_name: r.count for r in store.global_weekly_leaderboard(s, e, limit=None)}
+    assert glob == {"Alice": 1, "Bob": 1}
+
+
+def test_expired_dispute_keeps_the_point(tmp_path):
+    store = Storage(str(tmp_path / "t.db"))
+    _, log_id = store.increment(1, 100, "Alice", "alice")
+    d = store.open_dispute(1, log_id, 100, 200, 3, time.time() + 300)
+    store.set_dispute_resolved(d["id"], "expired")
+    assert not store.is_overturned(log_id)
+    s, e = week_bounds()
+    assert store.weekly_leaderboard(1, s, e, limit=None)[0].count == 1

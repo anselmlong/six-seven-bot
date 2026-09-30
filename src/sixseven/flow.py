@@ -21,6 +21,8 @@ matplotlib.use("Agg")  # headless container — never touch a display
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 
+from .storage import NOT_OVERTURNED_SQL
+
 log = logging.getLogger(__name__)
 
 _SGT = timezone(timedelta(hours=8))
@@ -51,12 +53,12 @@ def render_race(db_path: str, chat_id: int, since_days: int | None = None, fps: 
     try:
         if since_ts is None:
             rows = conn.execute(
-                """
+                f"""
                 SELECT user_id,
                        MAX(COALESCE(NULLIF(display_name,''), NULLIF(username,''), 'anon')),
                        created_at
                 FROM points_log
-                WHERE chat_id = ?
+                WHERE chat_id = ? AND {NOT_OVERTURNED_SQL}
                 GROUP BY user_id, created_at
                 ORDER BY created_at
                 """,
@@ -64,12 +66,12 @@ def render_race(db_path: str, chat_id: int, since_days: int | None = None, fps: 
             ).fetchall()
         else:
             rows = conn.execute(
-                """
+                f"""
                 SELECT user_id,
                        MAX(COALESCE(NULLIF(display_name,''), NULLIF(username,''), 'anon')),
                        created_at
                 FROM points_log
-                WHERE chat_id = ? AND created_at >= ?
+                WHERE chat_id = ? AND created_at >= ? AND {NOT_OVERTURNED_SQL}
                 GROUP BY user_id, created_at
                 ORDER BY created_at
                 """,
