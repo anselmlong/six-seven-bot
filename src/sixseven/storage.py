@@ -19,6 +19,13 @@ class LeaderRow:
 _DEDUP_TTL = 7 * 24 * 3600  # 7 days in seconds
 _WEEK = 7 * 24 * 3600
 
+# points_log keeps a row for every award, including ones a dispute later
+# overturned. Anything counting from points_log (weekly boards, /flow) must
+# skip those rows, or overturned points keep counting.
+NOT_OVERTURNED_SQL = (
+    "id NOT IN (SELECT points_log_id FROM disputes WHERE status = 'overturned')"
+)
+
 
 def week_bounds(offset_weeks: int = 0) -> tuple[float, float]:
     """Epoch (start, end) of a rolling 7-day window (matches /flow week).
@@ -330,6 +337,16 @@ class Storage:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def is_overturned(self, points_log_id: int) -> bool:
+        """True if a dispute already overturned this point."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM disputes WHERE points_log_id = ? "
+                "AND status = 'overturned' LIMIT 1",
+                (points_log_id,),
+            ).fetchone()
+        return row is not None
+
     def set_dispute_resolved(self, dispute_id: int, status: str) -> None:
         with self._lock:
             self._conn.execute(
@@ -518,11 +535,13 @@ class Storage:
                        ) AS rn
                 FROM points_log r
                 WHERE {cond}created_at >= ? AND created_at < ?
+                  AND r.{NOT_OVERTURNED_SQL}
             ),
             agg AS (
                 SELECT user_id, COUNT(*) AS cnt, MAX(created_at) AS last_hit
                 FROM points_log r
                 WHERE {cond}created_at >= ? AND created_at < ?
+                  AND r.{NOT_OVERTURNED_SQL}
                 GROUP BY user_id
             )
             SELECT r.user_id, r.display_name, r.username, a.cnt AS count, a.last_hit
