@@ -11,10 +11,12 @@ import re
 import tempfile
 import time as _time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, time as _dt_time, timezone
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters, Update
+from telegram.constants import ChatType, ParseMode
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -24,11 +26,13 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.helpers import mention_html
 
 from . import flow, media
 from .config import Config
 from .detector import Detector
 from .storage import Storage, week_bounds
+from .watchdog import NetworkWatchdog
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +54,12 @@ _CHANGELOG_CHATS = {495290408}  # anselm's DM
 _ANNOUNCE_MSG, _ANNOUNCE_CONFIRM = range(2)
 _DISPUTE_TIMEOUT = 300  # a dispute auto-expires after 5 minutes
 _DISPUTE_THRESHOLD = 3  # fixed votes needed to overturn a point
+_NETWORK_PROBE_INTERVAL = 60  # seconds between Telegram reachability probes
+_NETWORK_DOWN_EXIT_AFTER = 300  # exit (and get restarted) after 5 min unreachable
+_PENDING_RETRY_INTERVAL = 120  # seconds between retry passes over failed downloads
+_PENDING_BATCH = 10  # max queued media retried per pass
+_PENDING_MAX_ATTEMPTS = 10  # attempts made while the network is otherwise healthy
+_PENDING_MAX_AGE = 24 * 3600  # an award a day late is pointless — give up
 
 
 def build_application(config: Config, storage: Storage, detector: Detector) -> Application:
@@ -133,6 +143,20 @@ def build_application(config: Config, storage: Storage, detector: Detector) -> A
         time=_dt_time(hour=16, minute=0, tzinfo=timezone.utc),
         days=(0,),
         name="weekly-celebration",
+    )
+
+    app.bot_data["watchdog"] = NetworkWatchdog(_NETWORK_DOWN_EXIT_AFTER)
+    app.job_queue.run_repeating(
+        network_probe,
+        interval=_NETWORK_PROBE_INTERVAL,
+        first=_NETWORK_PROBE_INTERVAL,
+        name="network-probe",
+    )
+    app.job_queue.run_repeating(
+        retry_pending_media,
+        interval=_PENDING_RETRY_INTERVAL,
+        first=30,  # pick up anything left queued from before a restart
+        name="retry-pending-media",
     )
 
     return app
@@ -661,20 +685,21 @@ async def cmd_mog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 _SIXSEVEN_GIF_PATH = "/data/sixseven67.gif"
 
 
-async def _send_sixseven_milestone(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                   user, new_count: int) -> None:
+async def _send_sixseven_milestone(context: ContextTypes.DEFAULT_TYPE, ref: "_MediaRef",
+                                   mention: str, new_count: int) -> None:
     """When someone hits 67 67s (and each 167, 267, ... after), fire the gif + congrats."""
     if new_count % 100 != 67:
         return
     if not os.path.exists(_SIXSEVEN_GIF_PATH):
         log.warning("sixseven milestone gif missing at %s", _SIXSEVEN_GIF_PATH)
         return
-    name = user.mention_html()
-    congrats = f"{name} has reached {new_count} 67s! 🎉"
+    congrats = f"{mention} has reached {new_count} 67s! 🎉"
     try:
         with open(_SIXSEVEN_GIF_PATH, "rb") as f:
-            await update.effective_message.reply_animation(f)
-        await update.effective_message.reply_text(congrats, parse_mode=ParseMode.HTML)
+            await context.bot.send_animation(animation=f, **ref.reply_kwargs())
+        await context.bot.send_message(
+            text=congrats, parse_mode=ParseMode.HTML, **ref.reply_kwargs()
+        )
     except Exception as exc:
         log.warning("failed to send 67 milestone gif: %s", exc)
 
@@ -767,10 +792,128 @@ def _resolve_media(msg, config: Config):
     return None
 
 
+@dataclass(frozen=True)
+class _MediaRef:
+    """Where a scanned media message lives, so the bot can reply to it — either
+    straight away or later, from the retry queue, when only the ids survive."""
+
+    chat_id: int
+    message_id: int
+    thread_id: int | None  # forum topic, so replies land in the same topic
+    quote: bool  # mirrors Message.reply_*: quote in groups, not in private chats
+
+    @classmethod
+    def from_message(cls, msg) -> "_MediaRef":
+        return cls(
+            chat_id=msg.chat_id,
+            message_id=msg.message_id,
+            thread_id=msg.message_thread_id if msg.is_topic_message else None,
+            quote=msg.chat.type != ChatType.PRIVATE,
+        )
+
+    def reply_kwargs(self) -> dict:
+        kwargs: dict = {"chat_id": self.chat_id, "message_thread_id": self.thread_id}
+        if self.quote:
+            # A retried award can land after the original was deleted — still post it.
+            kwargs["reply_parameters"] = ReplyParameters(
+                message_id=self.message_id, allow_sending_without_reply=True
+            )
+        return kwargs
+
+
+class _DownloadError(Exception):
+    """Fetching a file from Telegram failed in a way worth retrying later."""
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Network trouble is worth retrying; a BadRequest (e.g. file too big) never
+    will be, even though PTB files it under NetworkError."""
+    return isinstance(exc, NetworkError) and not isinstance(exc, BadRequest)
+
+
+async def _scan_media(context: ContextTypes.DEFAULT_TYPE, file_id: str, kind: str, size: int):
+    """Download a media file and run detection on it.
+
+    Raises _DownloadError when the download failed on a retryable network error.
+    Any other exception is a failure that a retry won't fix.
+    """
+    detector: Detector = context.bot_data["detector"]
+    path = None
+    try:
+        tf = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
+        path = tf.name
+        tf.close()
+        log.info("on_media: downloading %s (kind=%s, size=%d)", file_id, kind, size or 0)
+        try:
+            tg_file = await context.bot.get_file(file_id)
+            await tg_file.download_to_drive(path)
+        except Exception as exc:
+            if _is_retryable(exc):
+                raise _DownloadError(str(exc)) from exc
+            raise
+
+        loop = asyncio.get_running_loop()
+        executor: ThreadPoolExecutor = context.bot_data["detect_executor"]
+        return await loop.run_in_executor(executor, detector.detect, path, kind)
+    finally:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+async def _award(context: ContextTypes.DEFAULT_TYPE, ref: _MediaRef, user_id: int,
+                 display_name: str, username: str, kinds: set[str]) -> None:
+    """Count a detection and announce it, replying to the original media."""
+    storage: Storage = context.bot_data["storage"]
+
+    # 69 gets a special response — no counter, no leaderboard
+    if "69" in kinds:
+        await context.bot.send_message(text="69. nice 😎👍", **ref.reply_kwargs())
+
+    if "67" not in kinds:
+        return
+
+    new_count, log_id = storage.increment(
+        ref.chat_id,
+        user_id,
+        display_name,
+        username,
+        media_message_id=ref.message_id,
+    )
+    mention = mention_html(user_id, display_name)
+
+    # Milestone: singleton celebration when someone hits 67 67s (and each
+    # 167, 267, ... after). Fires unconditionally, before notify-mode gating.
+    await _send_sixseven_milestone(context, ref, mention, new_count)
+
+    # Check notify mode
+    mode = storage.get_notify_mode(ref.chat_id)
+    if mode == "quiet":
+        return
+    if mode == "daily":
+        return  # daily summary handled by the scheduled job
+
+    # instant mode — reply right away with a dispute affordance
+    plural = "s" if new_count != 1 else ""
+    msg_text = random.choice(_DETECT_MSGS).format(
+        user=mention, count=new_count, plural=plural
+    )
+    award = await context.bot.send_message(
+        text=msg_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⚖️ Dispute", callback_data=f"dispute:{log_id}")]]
+        ),
+        **ref.reply_kwargs(),
+    )
+    storage.update_award_message(log_id, award.message_id)
+
+
 async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.bot_data["config"]
     storage: Storage = context.bot_data["storage"]
-    detector: Detector = context.bot_data["detector"]
 
     msg = update.effective_message
     user = update.effective_user
@@ -794,71 +937,116 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("skipping %s: %d bytes exceeds limit", file_id, size)
         return
 
-    path = None
+    ref = _MediaRef.from_message(msg)
     try:
-        tf = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
-        path = tf.name
-        tf.close()
-        log.info("on_media: downloading %s (kind=%s, size=%d)", file_id, kind, size or 0)
-        tg_file = await context.bot.get_file(file_id)
-        await tg_file.download_to_drive(path)
-
-        loop = asyncio.get_running_loop()
-        executor: ThreadPoolExecutor = context.bot_data["detect_executor"]
-        result = await loop.run_in_executor(executor, detector.detect, path, kind)
-    except Exception as exc:
-        log.warning("failed to process media %s: %s", file_id, exc)
+        result = await _scan_media(context, file_id, kind, size)
+    except _DownloadError as exc:
+        storage.queue_pending_media(
+            ref.chat_id, ref.message_id, ref.thread_id, ref.quote,
+            user.id, user.full_name, user.username or "", file_id, kind, str(exc),
+        )
+        log.warning(
+            "download failed for media %s (chat %s, msg %s, user %s) — queued for retry: %s",
+            file_id, ref.chat_id, ref.message_id, user.id, exc,
+        )
         return
-    finally:
-        if path and os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+    except Exception as exc:
+        log.warning(
+            "failed to process media %s (chat %s, msg %s, user %s): %s",
+            file_id, ref.chat_id, ref.message_id, user.id, exc,
+        )
+        return
 
     if not result.matched:
         return
 
-    kinds = set(result.kinds)
+    await _award(context, ref, user.id, user.full_name, user.username or "", set(result.kinds))
 
-    # 69 gets a special response — no counter, no leaderboard
-    if "69" in kinds:
-        await msg.reply_text("69. nice 😎👍")
 
-    if "67" in kinds:
-        new_count, log_id = storage.increment(
-            update.effective_chat.id,
-            user.id,
-            user.full_name,
-            user.username or "",
-            media_message_id=msg.message_id,
+async def retry_pending_media(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Periodic job: retry media whose download failed on a network error."""
+    storage: Storage = context.bot_data["storage"]
+    watchdog: NetworkWatchdog = context.bot_data["watchdog"]
+
+    for row in storage.expire_pending_media(_PENDING_MAX_AGE):
+        log.warning(
+            "giving up on queued media %s (chat %s, msg %s, user %s) after %d attempts: %s",
+            row["file_id"], row["chat_id"], row["message_id"], row["user_id"],
+            row["attempts"], row["last_error"],
         )
 
-        # Milestone: singleton celebration when someone hits 67 67s (and each
-        # 167, 267, ... after). Fires unconditionally, before notify-mode gating.
-        await _send_sixseven_milestone(update, context, user, new_count)
+    # Retrying while the network is down would just burn attempts.
+    if watchdog.is_failing:
+        return
 
-        # Check notify mode
-        mode = storage.get_notify_mode(update.effective_chat.id)
-        if mode == "quiet":
-            return
-        if mode == "daily":
-            return  # daily summary handled by the scheduled job
+    for row in storage.pending_media(limit=_PENDING_BATCH):
+        chat_id, message_id = row["chat_id"], row["message_id"]
+        try:
+            result = await _scan_media(context, row["file_id"], row["kind"], 0)
+        except _DownloadError as exc:
+            attempts = storage.pending_media_failed(chat_id, message_id, str(exc))
+            if attempts >= _PENDING_MAX_ATTEMPTS:
+                storage.delete_pending_media(chat_id, message_id)
+                log.warning(
+                    "giving up on queued media %s (chat %s, msg %s, user %s) after %d attempts: %s",
+                    row["file_id"], chat_id, message_id, row["user_id"], attempts, exc,
+                )
+            continue
+        except Exception as exc:
+            storage.delete_pending_media(chat_id, message_id)
+            log.warning(
+                "failed to process queued media %s (chat %s, msg %s, user %s): %s",
+                row["file_id"], chat_id, message_id, row["user_id"], exc,
+            )
+            continue
 
-        # instant mode — reply right away with a dispute affordance
-        plural = "s" if new_count != 1 else ""
-        mention = user.mention_html()
-        msg_text = random.choice(_DETECT_MSGS).format(
-            user=mention, count=new_count, plural=plural
+        # Dequeue before awarding, so a failed reply can't award the point twice.
+        storage.delete_pending_media(chat_id, message_id)
+        log.info(
+            "retried queued media %s (chat %s, msg %s): matched=%s",
+            row["file_id"], chat_id, message_id, result.matched,
         )
-        award = await msg.reply_text(
-            msg_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⚖️ Dispute", callback_data=f"dispute:{log_id}")]]
-            ),
-        )
-        storage.update_award_message(log_id, award.message_id)
+        if result.matched:
+            ref = _MediaRef(chat_id, message_id, row["thread_id"], bool(row["quote"]))
+            await _award(
+                context, ref, row["user_id"], row["display_name"], row["username"],
+                set(result.kinds),
+            )
+
+
+async def _probe_telegram(bot) -> None:
+    """Raise if Telegram's API host can't be resolved fresh or doesn't answer."""
+    loop = asyncio.get_running_loop()
+    await asyncio.wait_for(loop.getaddrinfo("api.telegram.org", 443), timeout=10)
+    await bot.get_me()
+
+
+async def network_probe(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Periodic job: check Telegram is reachable; exit if it's been down too long.
+
+    Resolves the API host fresh on every probe. A plain get_me isn't enough:
+    httpx keeps connections alive, and on 2026-10-02 polling carried on over an
+    old connection for 37 minutes while every new DNS lookup failed.
+    """
+    watchdog: NetworkWatchdog = context.bot_data["watchdog"]
+    try:
+        await _probe_telegram(context.bot)
+    except Exception as exc:
+        if watchdog.record_failure():
+            log.critical(
+                "Telegram unreachable for %ds (%s) — stopping so the bot gets restarted",
+                watchdog.failing_for, exc,
+            )
+            context.bot_data["network_down_exit"] = True
+            context.application.stop_running()
+        else:
+            log.warning(
+                "network probe failed (down %ds so far): %s", watchdog.failing_for, exc
+            )
+        return
+    if watchdog.is_failing:
+        log.info("network probe recovered after %ds", watchdog.failing_for)
+    watchdog.record_success()
 
 
 async def auto_reset_check(context: ContextTypes.DEFAULT_TYPE) -> None:

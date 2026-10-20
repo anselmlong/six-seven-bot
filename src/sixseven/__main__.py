@@ -5,6 +5,7 @@ from __future__ import annotations
 import faulthandler
 import logging
 import os
+import sys
 
 # Bound native thread pools BEFORE torch/OpenBLAS load (lazily via EasyOCR).
 # The per-CPU default spikes memory/CPU during OCR inference and is the prime
@@ -19,7 +20,7 @@ from .config import Config
 from .detector import Detector
 from .ocr import OcrEngine
 from .storage import Storage
-from .vision import VisionEngine
+from .vision import build_vision_engine
 
 
 def main() -> None:
@@ -40,10 +41,11 @@ def main() -> None:
 
     config = Config.from_env()
     log.info(
-        "starting: ocr=%s vision=%s (model=%s)",
+        "starting: ocr=%s vision=%s (provider=%s model=%s)",
         config.ocr_enabled,
         config.vision_enabled,
-        config.vision_model if config.vision_enabled else "-",
+        config.vision_provider,
+        config.typesafe_model if config.vision_provider == "jev" else config.vision_model,
     )
 
     storage = Storage(config.db_path)
@@ -51,7 +53,7 @@ def main() -> None:
     # Build the EasyOCR model at startup: keeps the first image fast and makes
     # any init failure a clear boot-time log line rather than a mid-request one.
     ocr.warmup()
-    vision = VisionEngine(config.openai_api_key, config.vision_model)
+    vision = build_vision_engine(config)
     detector = Detector(
         ocr=ocr,
         vision=vision,
@@ -71,6 +73,10 @@ def main() -> None:
         # (SIGTERM/Ctrl-C). If the logs just cut off without it, the process was
         # killed hard — OOM or native crash — which points the diagnosis.
         log.info("polling stopped — shutting down cleanly")
+    if app.bot_data.get("network_down_exit"):
+        # The network watchdog stopped us. Exit non-zero so the restart is a
+        # visible failure (docker inspect / systemd) rather than a clean stop.
+        sys.exit(1)
 
 
 if __name__ == "__main__":

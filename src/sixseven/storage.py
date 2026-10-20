@@ -123,6 +123,28 @@ class Storage:
             )
             """
         )
+        # Media whose download failed on a network error, waiting to be
+        # retried. The dedup table already marked these messages processed, so
+        # Telegram re-delivery can't recover them — this queue is the only way.
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_media (
+                chat_id      INTEGER NOT NULL,
+                message_id   INTEGER NOT NULL,
+                thread_id    INTEGER,
+                quote        INTEGER NOT NULL DEFAULT 1,
+                user_id      INTEGER NOT NULL,
+                display_name TEXT    NOT NULL DEFAULT '',
+                username     TEXT    NOT NULL DEFAULT '',
+                file_id      TEXT    NOT NULL,
+                kind         TEXT    NOT NULL,
+                attempts     INTEGER NOT NULL DEFAULT 1,
+                last_error   TEXT    NOT NULL DEFAULT '',
+                created_at   REAL    NOT NULL,
+                PRIMARY KEY (chat_id, message_id)
+            )
+            """
+        )
         # Migrate existing dispute_votes tables to add voter names
         for col in (
             "display_name TEXT NOT NULL DEFAULT ''",
@@ -395,6 +417,75 @@ class Storage:
                 "DELETE FROM processed_messages WHERE processed_at < ?", (cutoff,)
             )
             self._conn.commit()
+
+    # ---------- pending media (download retry queue) ----------
+    def queue_pending_media(
+        self,
+        chat_id: int,
+        message_id: int,
+        thread_id: int | None,
+        quote: bool,
+        user_id: int,
+        display_name: str,
+        username: str,
+        file_id: str,
+        kind: str,
+        error: str,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO pending_media
+                    (chat_id, message_id, thread_id, quote, user_id, display_name,
+                     username, file_id, kind, last_error, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (chat_id, message_id, thread_id, int(quote), user_id, display_name,
+                 username, file_id, kind, error, time.time()),
+            )
+            self._conn.commit()
+
+    def pending_media(self, limit: int = 10) -> list[dict]:
+        """Queued media, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM pending_media ORDER BY created_at LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def pending_media_failed(self, chat_id: int, message_id: int, error: str) -> int:
+        """Record another failed attempt. Returns the new attempt count."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE pending_media SET attempts = attempts + 1, last_error = ? "
+                "WHERE chat_id = ? AND message_id = ?",
+                (error, chat_id, message_id),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT attempts FROM pending_media WHERE chat_id = ? AND message_id = ?",
+                (chat_id, message_id),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def delete_pending_media(self, chat_id: int, message_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM pending_media WHERE chat_id = ? AND message_id = ?",
+                (chat_id, message_id),
+            )
+            self._conn.commit()
+
+    def expire_pending_media(self, max_age: float, now: float | None = None) -> list[dict]:
+        """Drop queued media older than max_age seconds. Returns the dropped rows."""
+        cutoff = (time.time() if now is None else now) - max_age
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM pending_media WHERE created_at < ?", (cutoff,)
+            ).fetchall()
+            self._conn.execute("DELETE FROM pending_media WHERE created_at < ?", (cutoff,))
+            self._conn.commit()
+        return [dict(r) for r in rows]
 
     def set_reset_schedule(self, chat_id: int, schedule: str) -> None:
         """Set auto-reset schedule for a chat (off/daily/weekly/monthly)."""

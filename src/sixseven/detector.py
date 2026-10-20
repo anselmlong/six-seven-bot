@@ -10,13 +10,24 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Protocol
+
+from PIL import Image
 
 from . import media
 from .matcher import find_matches
 from .ocr import OcrEngine
-from .vision import VisionEngine
 
 log = logging.getLogger(__name__)
+
+
+class VisionBackend(Protocol):
+    """Either the OpenAI engine or the Jev engine satisfies this."""
+
+    @property
+    def enabled(self) -> bool: ...
+
+    def frame_contains_six_seven(self, frame: Image.Image) -> bool: ...
 
 
 @dataclass
@@ -29,7 +40,7 @@ class Detector:
     def __init__(
         self,
         ocr: OcrEngine,
-        vision: VisionEngine,
+        vision: VisionBackend,
         video_frame_samples: int,
         vision_max_frames: int,
     ) -> None:
