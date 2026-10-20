@@ -69,6 +69,11 @@ class VisionEngine:
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:image/png;base64,{data}",
+                                    # detail=low pins this to a flat 85 image tokens
+                                    # (vs 85 + 170/tile at high detail). The check is
+                                    # a coarse yes/no on a two-character meme, so the
+                                    # 512px downscale costs nothing in practice.
+                                    "detail": "low",
                                 },
                             },
                             {"type": "text", "text": _PROMPT},
