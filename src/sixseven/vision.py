@@ -26,13 +26,13 @@ _PROMPT = (
 )
 
 
-def _frame_to_png_b64(image: Image.Image) -> str:
-    """Encode a frame as base64 PNG, downscaling huge frames to bound cost."""
+def _frame_to_png_b64(image: Image.Image, max_px: int = 1568) -> str:
+    """Encode a frame as base64 PNG, downscaling to bound image-token cost."""
     buf = io.BytesIO()
     img = image
-    if max(img.size) > 1568:
+    if max(img.size) > max_px:
         img = img.copy()
-        img.thumbnail((1568, 1568))
+        img.thumbnail((max_px, max_px))
     img.save(buf, format="PNG")
     return base64.standard_b64encode(buf.getvalue()).decode("utf-8")
 
@@ -96,14 +96,19 @@ class VisionEngine:
 # Jev (TypeSafe AI) is a decision model, not a chat model: you post state plus
 # typed questions and get typed answers with calibrated probabilities. That maps
 # onto this task better than parsing "YES" out of generated text — the answer is
-# already a boolean with a confidence we can threshold on.
+# already a probability we can threshold on.
+#
+# Request shape (https://api.typesafe.ai/v1/systemone):
+#   {model, state, assets:{ref:{type,format,data_base64}}, questions:{id:{type,instructions}}}
+# Images ride in the top-level `assets` map and are referenced by name in text.
 #
 # Image input is behind TypeSafe's "danger zone" header and is explicitly
 # flagged as not production-ready by the vendor, so this stays opt-in.
+_JEV_REF = "frame"
 _JEV_QUESTION = (
-    "The image contains the digits 6 and 7 adjacent to each other (as \"67\"), "
-    "anywhere, in any style: inside a longer number, standalone, handwritten, "
-    "printed, or as meme text."
+    "The image `frame` contains the digits 6 and 7 adjacent to each other (as "
+    '"67"), anywhere, in any style: inside a longer number, standalone, '
+    "handwritten, printed, or as meme text."
 )
 
 
@@ -117,19 +122,24 @@ class JevVisionEngine:
         base_url: str,
         threshold: float,
         provider: str = "typesafe",
+        max_px: int = 768,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._threshold = threshold
         self._provider = provider
+        # Jev bills image tokens by pixel area, and recall falls off a cliff
+        # below ~512px (text under 2% of frame height stops being readable).
+        # 768 keeps a 1%-height "67" detectable at ~1/4 the tokens of 1568.
+        self._max_px = max_px
 
     @property
     def enabled(self) -> bool:
         return bool(self._api_key and self._base_url)
 
     def _frame_to_png_b64(self, image: Image.Image) -> str:
-        return VisionEngine._frame_to_png_b64(self, image)  # same downscale rules
+        return _frame_to_png_b64(image, self._max_px)
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -144,56 +154,48 @@ class JevVisionEngine:
     def _payload(self, data: str) -> dict:
         return {
             "model": self._model,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": "A frame from a chat message."},
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:image/png;base64,{data}",
-                        },
-                    ],
+            "state": {"frame": _JEV_REF},
+            "assets": {
+                _JEV_REF: {
+                    "type": "image",
+                    "format": "png",
+                    "data_base64": data,
                 }
-            ],
-            "questions": [
-                {
-                    "type": "predicate",
-                    "name": "has_six_seven",
+            },
+            "questions": {
+                "has_six_seven": {
+                    "type": "noul",
                     "instructions": _JEV_QUESTION,
                 }
-            ],
+            },
         }
 
     @staticmethod
     def _extract_probability(payload: dict) -> float | None:
-        """Pull a 0-1 probability out without pinning an exact response shape.
+        """Return the 0-1 noul for our question, or None if the shape is off.
 
-        The Decisions API has shipped a few answer layouts; rather than guess
-        one, accept the common spellings and fail closed if none is present.
+        The documented shape is {"answers": {"has_six_seven": {"noul": 0.97}}}.
+        A few older/alternate layouts are accepted too, but anything missing a
+        usable number returns None so the caller fails closed (no match).
         """
-        answers = payload.get("answers") or payload.get("results") or []
-        if isinstance(answers, dict):
-            answers = [answers]
-        for ans in answers:
-            if not isinstance(ans, dict):
-                continue
-            if ans.get("name") not in (None, "has_six_seven"):
-                continue
-            for key in ("probability", "p", "score", "value", "confidence"):
-                val = ans.get(key)
-                if isinstance(val, bool):
-                    return 1.0 if val else 0.0
-                if isinstance(val, (int, float)):
-                    return float(val)
-            nested = ans.get("answer")
-            if isinstance(nested, dict):
-                for key in ("probability", "p", "value"):
-                    val = nested.get(key)
-                    if isinstance(val, (int, float)):
-                        return float(val)
-                if isinstance(nested.get("probability"), bool):
-                    return 1.0 if nested["probability"] else 0.0
+        answers = payload.get("answers")
+        if isinstance(answers, list):
+            answers = {a.get("name"): a for a in answers if isinstance(a, dict)}
+        if not isinstance(answers, dict):
+            return None
+
+        entry = answers.get("has_six_seven")
+        if entry is None and len(answers) == 1:
+            entry = next(iter(answers.values()))
+        if not isinstance(entry, dict):
+            return None
+
+        for key in ("noul", "probability", "p", "value", "score"):
+            val = entry.get(key)
+            if isinstance(val, bool):
+                return 1.0 if val else 0.0
+            if isinstance(val, (int, float)):
+                return float(val)
         return None
 
     def frame_contains_six_seven(self, image: Image.Image) -> bool:
@@ -201,13 +203,17 @@ class JevVisionEngine:
             return False
         try:
             data = self._frame_to_png_b64(image)
-            with httpx.Client(timeout=20.0) as client:
+            url = f"{self._base_url}/systemone"
+            with httpx.Client(timeout=25.0) as client:
                 resp = client.post(
-                    f"{self._base_url}/decisions",
+                    url,
                     headers=self._headers(),
                     json=self._payload(data),
                 )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                # Body may echo request details; keep it short and key-free.
+                log.warning("jev check failed: HTTP %s", resp.status_code)
+                return False
             prob = self._extract_probability(resp.json())
             if prob is None:
                 log.warning("jev: no probability in response, treating as no-match")
@@ -215,23 +221,20 @@ class JevVisionEngine:
             log.info("jev: p=%.3f threshold=%.2f", prob, self._threshold)
             return prob >= self._threshold
         except Exception as exc:
-            log.warning("jev check failed: %s", exc)
+            log.warning("jev check failed: %s", type(exc).__name__)
             return False
 
 
 def build_vision_engine(config) -> "VisionEngine | JevVisionEngine":
-    """Pick the vision backend from config, falling back to OCR-only if unset."""
+    """Pick the vision backend from config, falling back to OpenAI if unset."""
     if config.vision_provider == "jev" and config.typesafe_api_key:
-        log.info(
-            "vision provider: jev (%s via %s)",
-            config.typesafe_model,
-            config.typesafe_base_url,
-        )
+        log.info("vision provider: jev (%s via %s)", config.typesafe_model, config.typesafe_base_url)
         return JevVisionEngine(
             api_key=config.typesafe_api_key,
             model=config.typesafe_model,
             base_url=config.typesafe_base_url,
             threshold=config.typesafe_threshold,
             provider=config.typesafe_provider,
+            max_px=config.typesafe_max_px,
         )
     return VisionEngine(config.openai_api_key, config.vision_model)

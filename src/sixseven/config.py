@@ -45,11 +45,14 @@ class Config:
     vision_provider: str = "openai"
     # TypeSafe/Jev settings — only used when vision_provider == "jev".
     typesafe_api_key: str = ""
-    typesafe_model: str = "typesafe-ai/jev-1.14.0"
-    typesafe_base_url: str = "https://ai-gateway.vercel.sh/v1"
-    typesafe_provider: str = "gateway"  # "gateway" (Vercel) or "typesafe" (direct)
+    typesafe_model: str = "jev-1.14.0"
+    typesafe_base_url: str = "https://api.typesafe.ai/v1"
+    typesafe_provider: str = "typesafe"  # "typesafe" (direct) or "gateway" (Vercel)
     # Probability threshold for a Jev yes/no answer.
     typesafe_threshold: float = 0.85
+    # Longest edge sent to Jev. Tokens scale with pixel area; below ~512px
+    # small text stops being readable, so 768 is the safe floor.
+    typesafe_max_px: int = 768
     ocr_enabled: bool = True
     ocr_languages: list[str] = field(default_factory=lambda: ["en"])
     # How many frames to sample from a video/animation for OCR.
@@ -88,13 +91,14 @@ class Config:
                 or os.getenv("AI_GATEWAY_API_KEY", "").strip()
             ),
             typesafe_model=os.getenv(
-                "SIXSEVEN_JEV_MODEL", "typesafe-ai/jev-1.14.0"
+                "SIXSEVEN_JEV_MODEL", "jev-1.14.0"
             ).strip(),
             typesafe_base_url=os.getenv(
-                "SIXSEVEN_JEV_BASE_URL", "https://ai-gateway.vercel.sh/v1"
+                "SIXSEVEN_JEV_BASE_URL", "https://api.typesafe.ai/v1"
             ).strip(),
-            typesafe_provider=os.getenv("SIXSEVEN_JEV_PROVIDER", "gateway").strip().lower(),
+            typesafe_provider=os.getenv("SIXSEVEN_JEV_PROVIDER", "typesafe").strip().lower(),
             typesafe_threshold=_float("SIXSEVEN_JEV_THRESHOLD", 0.85),
+            typesafe_max_px=_int("SIXSEVEN_JEV_MAX_PX", 768),
             ocr_enabled=_bool("SIXSEVEN_OCR_ENABLED", True),
             ocr_languages=[s.strip() for s in langs.split(",") if s.strip()],
             video_frame_samples=_int("SIXSEVEN_VIDEO_FRAMES", 4),
