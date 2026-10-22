@@ -261,3 +261,68 @@ def test_expired_dispute_keeps_the_point(tmp_path):
     assert not store.is_overturned(log_id)
     s, e = week_bounds()
     assert store.weekly_leaderboard(1, s, e, limit=None)[0].count == 1
+
+
+def _queue(store, chat_id=1, message_id=10, **kw):
+    args = dict(
+        thread_id=None, quote=True, user_id=100, display_name="Alice",
+        username="alice", file_id="FILE", kind="image", error="dns down",
+    )
+    args.update(kw)
+    store.queue_pending_media(chat_id, message_id, **args)
+
+
+def test_pending_media_roundtrip(tmp_path):
+    store = Storage(str(tmp_path / "t.db"))
+    _queue(store, message_id=10, thread_id=7, quote=False)
+    rows = store.pending_media()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["chat_id"], row["message_id"], row["thread_id"]) == (1, 10, 7)
+    assert row["quote"] == 0
+    assert (row["user_id"], row["display_name"], row["username"]) == (100, "Alice", "alice")
+    assert (row["file_id"], row["kind"]) == ("FILE", "image")
+    assert (row["attempts"], row["last_error"]) == (1, "dns down")
+
+    store.delete_pending_media(1, 10)
+    assert store.pending_media() == []
+
+
+def test_pending_media_ignores_duplicate_queueing(tmp_path):
+    store = Storage(str(tmp_path / "t.db"))
+    _queue(store, file_id="FIRST")
+    _queue(store, file_id="SECOND")
+    rows = store.pending_media()
+    assert len(rows) == 1 and rows[0]["file_id"] == "FIRST"
+
+
+def test_pending_media_oldest_first_and_limited(tmp_path):
+    store = Storage(str(tmp_path / "t.db"))
+    for mid in (3, 1, 2):
+        _queue(store, message_id=mid)
+        time.sleep(0.01)
+    assert [r["message_id"] for r in store.pending_media()] == [3, 1, 2]
+    assert [r["message_id"] for r in store.pending_media(limit=2)] == [3, 1]
+
+
+def test_pending_media_failed_counts_attempts(tmp_path):
+    store = Storage(str(tmp_path / "t.db"))
+    _queue(store)
+    assert store.pending_media_failed(1, 10, "timed out") == 2
+    assert store.pending_media_failed(1, 10, "still down") == 3
+    assert store.pending_media()[0]["last_error"] == "still down"
+    assert store.pending_media_failed(1, 999, "gone") == 0  # unknown row
+
+
+def test_expire_pending_media_drops_only_old_rows(tmp_path):
+    store = Storage(str(tmp_path / "t.db"))
+    _queue(store, message_id=1)
+    _queue(store, message_id=2)
+    with store._lock:
+        store._conn.execute(
+            "UPDATE pending_media SET created_at = created_at - 100000 WHERE message_id = 1"
+        )
+        store._conn.commit()
+    dropped = store.expire_pending_media(max_age=24 * 3600)
+    assert [r["message_id"] for r in dropped] == [1]
+    assert [r["message_id"] for r in store.pending_media()] == [2]

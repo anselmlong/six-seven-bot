@@ -3,6 +3,11 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Safety valve: cap container memory so a runaway OCR allocation is killed
     # at the container boundary (clean exit 137, visible in `docker inspect`)
     # instead of silently OOM-killing something on the host. Raised 2g→3g on
