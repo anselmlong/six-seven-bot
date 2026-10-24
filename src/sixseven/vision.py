@@ -74,11 +74,13 @@ class VisionEngine:
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:image/png;base64,{data}",
-                                    # detail=low pins this to a flat 85 image tokens
-                                    # (vs 85 + 170/tile at high detail). The check is
-                                    # a coarse yes/no on a two-character meme, so the
-                                    # 512px downscale costs nothing in practice.
-                                    "detail": "low",
+                                    # detail=high. "low" capped the image at 512px,
+                                    # which dropped small/stylised "67" and took the
+                                    # match rate from 44% to 13% — the tokens saved
+                                    # weren't worth the recall. Frames are already
+                                    # bounded to 1568px by _frame_to_png_b64, so
+                                    # high costs at most 4 tiles + base.
+                                    "detail": "high",
                                 },
                             },
                             {"type": "text", "text": _PROMPT},
@@ -129,9 +131,10 @@ class JevVisionEngine:
         self._base_url = base_url.rstrip("/")
         self._threshold = threshold
         self._provider = provider
-        # Jev bills image tokens by pixel area, and recall falls off a cliff
-        # below ~512px (text under 2% of frame height stops being readable).
-        # 768 keeps a 1%-height "67" detectable at ~1/4 the tokens of 1568.
+        # Jev bills image tokens by pixel area. 768 was chosen to save tokens
+        # on the assumption that a 1%-height "67" stayed readable; measured
+        # match rate says otherwise (13% at 768 vs 44% at full size), so the
+        # deployed value is 1568. Override with SIXSEVEN_JEV_MAX_PX.
         self._max_px = max_px
 
     @property
